@@ -130,11 +130,22 @@ func buildOliumEngineWithSpec(cfg *config.OliumConfig, spec SessionSpec) (*oengi
 		system += "\n\nApplication source code is available at: " + spec.SourcePath
 	}
 
+	// Turn ceiling for this engine: a per-call override (SessionSpec.MaxTurns —
+	// the guardrail's 1, intent's 30, the verifier's own cap) wins; otherwise
+	// fall back to agent.olium.max_turns, which is the knob operators set for
+	// exactly these non-autopilot engine uses (triage, swarm phases, source
+	// analysis, query). Until this fallback existed the config value was read
+	// by nothing and every such run silently used the engine default of 32.
+	maxTurns := spec.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = cfg.MaxTurns
+	}
+
 	ecfg := oengine.Config{
 		Provider:          prov,
 		Model:             model,
 		System:            system,
-		MaxTurns:          spec.MaxTurns,
+		MaxTurns:          maxTurns,
 		EnablePromptCache: spec.EnablePromptCache,
 		// Skills, when set, are rendered into the system prompt as an
 		// <available_skills> block by engine.New. The load_skill tool that
