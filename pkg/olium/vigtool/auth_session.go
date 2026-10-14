@@ -70,6 +70,16 @@ func (a *authSessionLookupTool) Execute(ctx context.Context, args map[string]any
 		}, nil
 	}
 	if len(rows) == 0 {
+		// Nothing at this hostname. Name what IS configured project-wide so the
+		// caller can retry against the real host instead of guessing names.
+		if all, listErr := a.ctx.Repo.GetAuthenticationHostnamesByProject(ctx, a.ctx.ProjectUUID); listErr == nil && len(all) > 0 {
+			return tool.Result{
+				Content: fmt.Sprintf("auth_session_lookup: no auth session for %s; available: %s",
+					hostname, joinSessionNamesWithHost(all)),
+				Details: map[string]any{"hostname": hostname, "matches": 0},
+				IsError: true,
+			}, nil
+		}
 		return tool.Result{
 			Content: fmt.Sprintf(`{"hostname":%q,"sessions":[]}`, hostname),
 			Details: map[string]any{"hostname": hostname, "matches": 0},
@@ -85,9 +95,17 @@ func (a *authSessionLookupTool) Execute(ctx context.Context, args map[string]any
 			}
 		}
 		if picked == nil {
+			// A wrong name is the most common miss: state the real names (and,
+			// for sessions that live elsewhere, their hosts) so the model stops
+			// probing names that were never configured.
+			available := joinSessionNames(rows)
+			if all, listErr := a.ctx.Repo.GetAuthenticationHostnamesByProject(ctx, a.ctx.ProjectUUID); listErr == nil {
+				if others := sessionsForOtherHostnames(all, hostname); len(others) > 0 {
+					available += "; also configured: " + joinSessionNamesWithHost(others)
+				}
+			}
 			return tool.Result{
-				Content: fmt.Sprintf("auth_session_lookup: no session %q registered for %s. Available: %s",
-					name, hostname, joinSessionNames(rows)),
+				Content: fmt.Sprintf("auth_session_lookup: no session named %q; available: %s", name, available),
 				IsError: true,
 			}, nil
 		}
@@ -232,4 +250,25 @@ func joinSessionNames(rows []*database.AuthenticationHostname) string {
 		names = append(names, r.SessionName)
 	}
 	return strings.Join(names, ", ")
+}
+
+// joinSessionNamesWithHost renders each session as `name@hostname` so a caller
+// that probed the wrong host can see where the session it wanted actually is.
+func joinSessionNamesWithHost(rows []*database.AuthenticationHostname) string {
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, fmt.Sprintf("%s@%s", r.SessionName, r.Hostname))
+	}
+	return strings.Join(names, ", ")
+}
+
+// sessionsForOtherHostnames returns the rows that are not registered for host.
+func sessionsForOtherHostnames(rows []*database.AuthenticationHostname, host string) []*database.AuthenticationHostname {
+	out := make([]*database.AuthenticationHostname, 0, len(rows))
+	for _, r := range rows {
+		if r.Hostname != host {
+			out = append(out, r)
+		}
+	}
+	return out
 }

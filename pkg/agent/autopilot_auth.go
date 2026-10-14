@@ -163,13 +163,56 @@ func normalizeAutopilotSessionConfig(ctx context.Context, engine *Engine, cfg *A
 		if repaired != nil {
 			vr.Valid = append(vr.Valid, repaired.Sessions...)
 		} else {
-			*warnings = append(*warnings, "some discovered auth sessions were invalid and could not be repaired")
+			*warnings = append(*warnings, formatInvalidSessionWarning(vr.Invalid, vr.Valid))
 		}
 	}
 	if len(vr.Valid) == 0 {
 		return nil
 	}
 	return &AgentSessionConfig{Sessions: vr.Valid}
+}
+
+// invalidSessionWarningPrefix is the stable leading phrase of the warning
+// emitted when discovered sessions cannot be repaired. Callers and operators
+// grep for it, so the detail appended by formatInvalidSessionWarning is added
+// after the em dash rather than folded into the phrase.
+const invalidSessionWarningPrefix = "some discovered auth sessions were invalid and could not be repaired"
+
+// formatInvalidSessionWarning renders the unrepairable-session warning with the
+// detail the operator actually needs: which entries were dropped and why, and
+// which session names survive. Without the names the operator sees only an
+// opaque failure and burns its run guessing (`auth_session_lookup` against
+// names that were never configured) instead of using the sessions that exist.
+func formatInvalidSessionWarning(invalid []authsession.InvalidSessionEntry, valid []AgentSessionEntry) string {
+	dropped := make([]string, 0, len(invalid))
+	for _, inv := range invalid {
+		name := strings.TrimSpace(inv.Entry.Name)
+		if name == "" {
+			name = "(unnamed)"
+		}
+		errs := strings.Join(inv.Errors, "; ")
+		if errs == "" {
+			errs = "failed validation"
+		}
+		dropped = append(dropped, fmt.Sprintf("%s (%s)", name, errs))
+	}
+	usable := "none"
+	if names := agentSessionNames(valid); len(names) > 0 {
+		usable = strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s — dropped: %s; usable: %s",
+		invalidSessionWarningPrefix, strings.Join(dropped, "; "), usable)
+}
+
+// agentSessionNames returns the non-empty session names in declaration order.
+func agentSessionNames(sessions []AgentSessionEntry) []string {
+	names := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		if n := strings.TrimSpace(s.Name); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
 }
 
 func (r *AutopilotPipelineRunner) prepareBrowserAuth(ctx context.Context, cfg AutopilotPipelineConfig) (*AgentSessionConfig, map[string]string, string, error) {
