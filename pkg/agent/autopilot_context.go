@@ -1,13 +1,18 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/uptrace/bun"
 	"github.com/vigolium/vigolium/pkg/audit"
+	"github.com/vigolium/vigolium/pkg/database"
+	"go.uber.org/zap"
 )
 
 type AutopilotContextBundle struct {
@@ -106,6 +111,20 @@ type AutopilotVerificationReport struct {
 	ConfirmedCount int      `json:"confirmed_count"`
 	DismissedCount int      `json:"dismissed_count"`
 	Warnings       []string `json:"warnings,omitempty"`
+	// FindingsSynthesized / DismissedSynthesized record that the artifact was
+	// absent when the operator finished and was therefore derived from the
+	// project DB. They make the provenance of a count legible in
+	// verification.json: a synthesized 9 and an operator-written 9 mean
+	// different things to whoever reads the run afterwards.
+	FindingsSynthesized  bool `json:"findings_synthesized,omitempty"`
+	DismissedSynthesized bool `json:"dismissed_synthesized,omitempty"`
+}
+
+// AutopilotArtifactSynthesis reports which operator artifacts the runner had to
+// derive from the project DB because the operator left them absent.
+type AutopilotArtifactSynthesis struct {
+	Findings  bool
+	Dismissed bool
 }
 
 func buildAutopilotContextBundle(cfg AutopilotPipelineConfig, ac *auditContextStruct, auditStatus string, warnings []string) AutopilotContextBundle {
@@ -470,8 +489,162 @@ func writeAutopilotArtifacts(spec AutopilotArtifactSpec, bundle AutopilotContext
 	return writeJSONArtifact(spec.ArtifactsPath, manifest)
 }
 
-func verifyAutopilotArtifacts(spec AutopilotArtifactSpec) AutopilotVerificationReport {
-	report := AutopilotVerificationReport{}
+// autopilotFindingStatuses / autopilotDismissedStatuses partition the judged
+// lifecycle statuses into the two artifact files. `draft` is deliberately in
+// neither: an unjudged row has had no verdict, so writing it as a finding or a
+// dismissal would invent a decision nobody made.
+var (
+	autopilotFindingStatuses   = []string{database.StatusConfirmed, database.StatusTriaged}
+	autopilotDismissedStatuses = []string{database.StatusFalsePositive, database.StatusAcceptedRisk}
+)
+
+// artifactFindingScope is the DB scope artifact synthesis reads: the run's
+// project, the agentic-scan uuids of the run tree, and any scan uuids the
+// findings may carry instead of an agentic-scan link.
+type artifactFindingScope struct {
+	projectUUID string
+	runUUIDs    []string
+	scanUUIDs   []string
+}
+
+// synthesizeAutopilotFindingArtifacts writes findings.json and dismissed.json
+// from the project DB when the operator left them absent. The artifacts are
+// derived views of the run's findings, not an independent obligation on the
+// model: two consecutive autopilot runs finished with their verified rows in
+// the DB and both artifacts missing, so verifyAutopilotArtifacts reported
+// "artifact missing" on runs that had done the work.
+//
+// Scope is the run itself plus every child run (the audit leg and native scans
+// it spawned) and the run's own scan uuid. Confirmed/triaged rows land in
+// findings.json, false_positive/accepted_risk in dismissed.json, draft rows are
+// unjudged and stay out. An empty run uuid falls back to project scope, exactly
+// as the triage writeback scopes when the pipeline has no run id. An artifact
+// the operator wrote is never overwritten — a present file wins — and an absent
+// one with no matching rows is written as `[]` so downstream readers see an
+// empty verdict, not a missing file.
+func synthesizeAutopilotFindingArtifacts(ctx context.Context, repo *database.Repository, spec AutopilotArtifactSpec, projectUUID, runUUID, scanUUID string) (AutopilotArtifactSynthesis, error) {
+	var synth AutopilotArtifactSynthesis
+	if repo == nil || projectUUID == "" {
+		return synth, nil
+	}
+	writeFindings := artifactAbsent(spec.FindingsPath)
+	writeDismissed := artifactAbsent(spec.DismissedPath)
+	if !writeFindings && !writeDismissed {
+		return synth, nil
+	}
+
+	scope := artifactFindingScope{projectUUID: projectUUID}
+	if runUUID != "" {
+		scope.runUUIDs = append(scope.runUUIDs, runUUID)
+		children, err := repo.GetChildAgenticScans(ctx, runUUID)
+		if err != nil {
+			// Non-fatal: fall back to the run's own uuid, exactly as the triage
+			// writeback does when the child lookup fails.
+			zap.L().Warn("artifact synthesis: child run lookup failed; scoping to the run's own uuid",
+				zap.String("agentic_scan_uuid", runUUID), zap.Error(err))
+		} else {
+			for _, child := range children {
+				if child.UUID != "" {
+					scope.runUUIDs = append(scope.runUUIDs, child.UUID)
+				}
+			}
+		}
+	}
+	if scanUUID != "" {
+		scope.scanUUIDs = append(scope.scanUUIDs, scanUUID)
+	}
+
+	findings, err := loadAutopilotArtifactFindings(ctx, repo, scope)
+	if err != nil {
+		return synth, err
+	}
+	confirmed := make([]*database.Finding, 0, len(findings))
+	dismissed := make([]*database.Finding, 0, len(findings))
+	for _, f := range findings {
+		if slices.Contains(autopilotDismissedStatuses, f.Status) {
+			dismissed = append(dismissed, f)
+		} else {
+			confirmed = append(confirmed, f)
+		}
+	}
+
+	if writeFindings {
+		if err := writeJSONArtifact(spec.FindingsPath, confirmed); err != nil {
+			return synth, fmt.Errorf("write synthesized findings artifact: %w", err)
+		}
+		synth.Findings = true
+		zap.L().Info("synthesized findings.json from the project DB (operator left it absent)",
+			zap.String("path", spec.FindingsPath),
+			zap.Int("findings", len(confirmed)),
+			zap.Strings("run_uuids", scope.runUUIDs))
+	}
+	if writeDismissed {
+		if err := writeJSONArtifact(spec.DismissedPath, dismissed); err != nil {
+			return synth, fmt.Errorf("write synthesized dismissed artifact: %w", err)
+		}
+		synth.Dismissed = true
+		zap.L().Info("synthesized dismissed.json from the project DB (operator left it absent)",
+			zap.String("path", spec.DismissedPath),
+			zap.Int("dismissed", len(dismissed)),
+			zap.Strings("run_uuids", scope.runUUIDs))
+	}
+	return synth, nil
+}
+
+// artifactAbsent reports whether path names a file that does not exist yet.
+// Any other stat error counts as "present" so a permissions problem never
+// clobbers a file that may already hold the operator's content.
+func artifactAbsent(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+// loadAutopilotArtifactFindings reads the run's judged findings with their
+// request/response evidence columns. The plain findings query excludes those
+// body columns, and countEvidenceBackedFindings keys on them — a synthesized
+// entry that carried no evidence would be reported as evidence-free even
+// though the row it came from has it.
+func loadAutopilotArtifactFindings(ctx context.Context, repo *database.Repository, scope artifactFindingScope) ([]*database.Finding, error) {
+	statuses := make([]string, 0, len(autopilotFindingStatuses)+len(autopilotDismissedStatuses))
+	statuses = append(statuses, autopilotFindingStatuses...)
+	statuses = append(statuses, autopilotDismissedStatuses...)
+
+	findings := make([]*database.Finding, 0)
+	q := repo.DB().NewSelect().Model(&findings).
+		Where("f.project_uuid = ?", scope.projectUUID).
+		Where("(f.record_kind IS NULL OR f.record_kind = '' OR f.record_kind = ?)", database.RecordKindFinding).
+		Where("f.status IN (?)", bun.List(statuses))
+	if len(scope.runUUIDs) > 0 || len(scope.scanUUIDs) > 0 {
+		q = q.WhereGroup("AND", func(sq *bun.SelectQuery) *bun.SelectQuery {
+			wrote := false
+			if len(scope.runUUIDs) > 0 {
+				sq = sq.Where("f.agentic_scan_uuid IN (?)", bun.List(scope.runUUIDs))
+				wrote = true
+			}
+			if len(scope.scanUUIDs) > 0 {
+				if wrote {
+					sq = sq.WhereOr("f.scan_uuid IN (?)", bun.List(scope.scanUUIDs))
+				} else {
+					sq = sq.Where("f.scan_uuid IN (?)", bun.List(scope.scanUUIDs))
+				}
+			}
+			return sq
+		})
+	}
+	if err := q.OrderExpr("f.id ASC").Scan(ctx); err != nil {
+		return nil, fmt.Errorf("load findings for artifact synthesis: %w", err)
+	}
+	return findings, nil
+}
+
+func verifyAutopilotArtifacts(spec AutopilotArtifactSpec, synth AutopilotArtifactSynthesis) AutopilotVerificationReport {
+	report := AutopilotVerificationReport{
+		FindingsSynthesized:  synth.Findings,
+		DismissedSynthesized: synth.Dismissed,
+	}
 	confirmed, confirmedWarn := countEvidenceBackedFindings(spec.FindingsPath, spec.EvidenceDir)
 	report.ConfirmedCount = confirmed
 	if confirmedWarn != "" {
@@ -526,7 +699,11 @@ func countEvidenceBackedFindings(path string, evidenceDir string) (int, string) 
 }
 
 func hasEvidence(item map[string]any, evidenceDir string) bool {
-	for _, key := range []string{"evidence", "evidence_path", "request", "response"} {
+	// HTTP-shaped evidence (bodies, stored payloads) plus the provenance a
+	// whitebox finding actually has: the file it was found in. Without
+	// source_file an audit finding — whose evidence IS its location, and which
+	// carries no request/response — would be counted as evidence-free.
+	for _, key := range []string{"evidence", "evidence_path", "request", "response", "source_file"} {
 		if v, ok := item[key]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
 			return true
 		}

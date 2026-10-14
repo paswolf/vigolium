@@ -187,6 +187,92 @@ func TestUpdateFindingStatusByHash(t *testing.T) {
 	}
 }
 
+// TestUpdateFindingStatusByHashForRuns covers the multi-run sibling of
+// UpdateFindingStatusByHash used by the autopilot triage writeback: one hash
+// must flip the rows owned by every attempted run uuid and nothing else, while
+// an empty run slice degrades to project-only scoping (the old behaviour).
+// includeUnattributed additionally reaches rows with no run uuid — pre-scan and
+// passive findings are stored that way, and the triage reads project-wide, so
+// without it those verdicts matched nothing (observed live).
+func TestUpdateFindingStatusByHashForRuns(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	// The unique index is (project_uuid, finding_hash), so rows sharing one hash
+	// must sit in distinct projects — that is exactly how the same hash can be
+	// scoped to several runs without the insert dedup collapsing them.
+	hash := uuid.NewString()
+	parent, child, other := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	idParent := saveFindingFull(t, repo, &Finding{ProjectUUID: uuid.NewString(), FindingHash: hash, AgenticScanUUID: parent, Status: StatusDraft})
+	idChild := saveFindingFull(t, repo, &Finding{ProjectUUID: uuid.NewString(), FindingHash: hash, AgenticScanUUID: child, Status: StatusDraft})
+	idOther := saveFindingFull(t, repo, &Finding{ProjectUUID: uuid.NewString(), FindingHash: hash, AgenticScanUUID: other, Status: StatusDraft})
+	idUnattributed := saveFindingFull(t, repo, &Finding{ProjectUUID: uuid.NewString(), FindingHash: hash, Status: StatusDraft})
+
+	statusOf := func(id int64) string {
+		t.Helper()
+		got, err := repo.GetFindingByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetFindingByID(%d): %v", id, err)
+		}
+		return got.Status
+	}
+
+	// Parent + child uuids: exactly those two rows flip; the unrelated run's
+	// copy and the unattributed row stay draft.
+	n, err := repo.UpdateFindingStatusByHashForRuns(ctx, "", []string{parent, child}, false, hash, StatusTriaged)
+	if err != nil {
+		t.Fatalf("UpdateFindingStatusByHashForRuns: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("rows updated = %d, want 2", n)
+	}
+	for id, want := range map[int64]string{
+		idParent: StatusTriaged, idChild: StatusTriaged,
+		idOther: StatusDraft, idUnattributed: StatusDraft,
+	} {
+		if got := statusOf(id); got != want {
+			t.Errorf("finding %d status = %q, want %q", id, got, want)
+		}
+	}
+
+	// includeUnattributed reaches the run's own row plus the one with no run
+	// uuid, and still leaves the unrelated run's copy alone.
+	n, err = repo.UpdateFindingStatusByHashForRuns(ctx, "", []string{parent}, true, hash, StatusFalsePositive)
+	if err != nil {
+		t.Fatalf("UpdateFindingStatusByHashForRuns(includeUnattributed): %v", err)
+	}
+	if n != 2 {
+		t.Errorf("rows updated with includeUnattributed = %d, want 2", n)
+	}
+	for id, want := range map[int64]string{
+		idParent: StatusFalsePositive, idUnattributed: StatusFalsePositive,
+		idOther: StatusDraft, idChild: StatusTriaged,
+	} {
+		if got := statusOf(id); got != want {
+			t.Errorf("finding %d status = %q, want %q", id, got, want)
+		}
+	}
+
+	// Empty run slice → project scope only, matching UpdateFindingStatusByHash
+	// called with agenticScanUUID "".
+	n, err = repo.UpdateFindingStatusByHashForRuns(ctx, "", nil, false, hash, StatusFixed)
+	if err != nil {
+		t.Fatalf("UpdateFindingStatusByHashForRuns(empty runs): %v", err)
+	}
+	if n != 4 {
+		t.Errorf("rows updated with empty runs = %d, want 4", n)
+	}
+
+	// Invalid args mirror UpdateFindingStatusByHash.
+	if _, err := repo.UpdateFindingStatusByHashForRuns(ctx, "", []string{parent}, false, hash, "bogus"); err == nil {
+		t.Error("invalid status should error")
+	}
+	if _, err := repo.UpdateFindingStatusByHashForRuns(ctx, "", []string{parent}, false, "", StatusFixed); err == nil {
+		t.Error("empty hash should error")
+	}
+}
+
 // TestFindingStatusWritesAreProjectScoped locks the project-isolation fix: a
 // writer scoped to project A cannot flip project B's finding by raw id or by a
 // finding_hash both projects share.

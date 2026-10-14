@@ -14,13 +14,19 @@ import (
 // RepairInvalidSessionConfig uses an LLM to fix garbled session config entries.
 // It stays in the root package because it depends on *Engine.
 func RepairInvalidSessionConfig(ctx context.Context, engine *Engine, original *AgentSessionConfig, targetURL string, cfg RepairConfig) *AgentSessionConfig {
-	if engine == nil || original == nil || len(original.Sessions) == 0 {
+	if original == nil || len(original.Sessions) == 0 {
+		return nil
+	}
+	if engine == nil {
+		zap.L().Warn("Cannot repair invalid session config: no engine available",
+			zap.Int("entries", len(original.Sessions)))
 		return nil
 	}
 
 	// Marshal the garbled config for the prompt
 	garbledJSON, err := json.MarshalIndent(original, "", "  ")
 	if err != nil {
+		zap.L().Warn("Cannot marshal invalid session config for repair", zap.Error(err))
 		return nil
 	}
 
@@ -45,14 +51,21 @@ func RepairInvalidSessionConfig(ctx context.Context, engine *Engine, original *A
 		ShowPrompt:   cfg.ShowPrompt,
 	})
 	if runErr != nil {
-		zap.L().Warn("LLM session config repair failed", zap.Error(runErr))
+		zap.L().Warn("LLM session config repair failed",
+			zap.Error(runErr),
+			zap.Strings("validation_errors", errorLines))
 		return nil
 	}
 
 	// Extract JSON from the response
 	repaired := parseRepairedSessionConfig(result.RawOutput)
 	if repaired == nil {
-		zap.L().Warn("Could not parse repaired session config from LLM output")
+		// Include a bounded snippet of the raw output: without it a parse
+		// failure is indistinguishable from an empty response, and the
+		// per-entry errors say what the prompt was asked to fix.
+		zap.L().Warn("Could not parse repaired session config from LLM output",
+			zap.String("raw_output", authsession.TruncateForLog(result.RawOutput, 200)),
+			zap.Strings("validation_errors", errorLines))
 		return nil
 	}
 
@@ -62,7 +75,8 @@ func RepairInvalidSessionConfig(ctx context.Context, engine *Engine, original *A
 	}
 	repaired = authsession.ValidateSessionConfig(repaired)
 	if repaired == nil {
-		zap.L().Warn("LLM-repaired session config still has invalid entries")
+		zap.L().Warn("LLM-repaired session config still has invalid entries",
+			zap.Strings("validation_errors", errorLines))
 		return nil
 	}
 
