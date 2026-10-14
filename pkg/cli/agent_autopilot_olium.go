@@ -112,7 +112,14 @@ func runAutopilotOlium(parentCtx context.Context, settings *config.Settings, rep
 		agent.CopySkillsToSessionDir(sessionDir)
 	}
 
-	projectUUID, _ := resolveProjectUUID()
+	projectUUID, projectErr := resolveProjectUUID()
+	if projectErr != nil {
+		// A --project-name that names no project used to be swallowed here:
+		// the run then wrote its findings to the Default Project and the
+		// post-run triage failed for want of a project UUID, with nothing in
+		// the log saying why. Fail before spending the run instead.
+		return fmt.Errorf("cannot scope this run to a project: %w", projectErr)
+	}
 	outcome.ProjectUUID = projectUUID
 	if err := prepareAutopilotAuthFiles(ctx, settings, repo, projectUUID, autopilotTarget, autopilotAuthFiles, !autopilotDryRun); err != nil {
 		return err
@@ -718,6 +725,9 @@ func runAutopilotOliumPipeline(
 		MaxCommands:           autopilotMaxCommands,
 		TokenBudget:           autopilotTokenBudget,
 		MaxCostUSD:            autopilotMaxCostUSD,
+		SectionMaxTurns:       settings.Agent.Olium.SectionMaxTurns,
+		StallTurns:            settings.Agent.Olium.StallTurns,
+		StallRotations:        settings.Agent.Olium.StallRotations,
 		SkipPreflight:         autopilotPreflight.skip,
 		DryRun:                autopilotDryRun,
 		ShowPrompt:            autopilotShowPrompt,

@@ -535,6 +535,55 @@ func (r *Repository) UpdateFindingStatusByHash(ctx context.Context, projectUUID,
 	return rows, nil
 }
 
+// UpdateFindingStatusByHashForRuns is UpdateFindingStatusByHash across a set of
+// agentic_scan_uuid scopes instead of a single one. Autopilot spawns a child audit
+// run (parent_run_uuid = the autopilot run uuid) that owns the findings it imports,
+// so the parent's post-scan triage must write across the parent uuid plus every
+// child uuid. An empty run list scopes only by project (when projectUUID is
+// non-empty), exactly like UpdateFindingStatusByHash called with agenticScanUUID "".
+//
+// includeUnattributed additionally matches rows with no run attribution at all
+// (agentic_scan_uuid NULL or empty) whenever run uuids are given. Pre-scan and
+// passive findings are stored that way, and the triage reads findings
+// project-wide — so without this the verdicts it reaches on those rows match
+// nothing and are silently dropped while the rows keep their scanner-assigned
+// status. Rows owned by a *different* run still never match, so the run scoping
+// that keeps one run's triage out of another's findings is preserved. With an
+// empty run list the scope stays project-level (see below) and this flag is
+// irrelevant.
+//
+// Returns the number of rows updated.
+func (r *Repository) UpdateFindingStatusByHashForRuns(ctx context.Context, projectUUID string, agenticScanUUIDs []string, includeUnattributed bool, findingHash, status string) (int64, error) {
+	if !IsValidFindingStatus(status) {
+		return 0, fmt.Errorf("UpdateFindingStatusByHashForRuns: invalid status %q", status)
+	}
+	if findingHash == "" {
+		return 0, fmt.Errorf("UpdateFindingStatusByHashForRuns: empty finding_hash")
+	}
+	q := r.db.NewUpdate().
+		Model((*Finding)(nil)).
+		Set("status = ?", status).
+		Where("finding_hash = ?", findingHash)
+	if projectUUID != "" {
+		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	switch {
+	case len(agenticScanUUIDs) > 0 && includeUnattributed:
+		q = q.Where("(agentic_scan_uuid IN (?) OR agentic_scan_uuid IS NULL OR agentic_scan_uuid = '')", bun.List(agenticScanUUIDs))
+	case len(agenticScanUUIDs) > 0:
+		q = q.Where("agentic_scan_uuid IN (?)", bun.List(agenticScanUUIDs))
+	}
+	// An empty run list leaves the scope at project level (no uuid filter) —
+	// includeUnattributed does not narrow it, because a caller with no run uuid
+	// to scope by has nothing to exclude in the first place.
+	res, err := q.Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("UpdateFindingStatusByHashForRuns: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	return rows, nil
+}
+
 // IsValidFindingSeverity reports whether s is a recognised Finding severity level.
 func IsValidFindingSeverity(s string) bool {
 	switch s {
