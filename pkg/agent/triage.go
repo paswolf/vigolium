@@ -456,18 +456,44 @@ func aggregateFollowUps(followUps []FollowUpScan) ScanRequest {
 // Finding.Status. Confirmed findings move draft → triaged; false positives move
 // draft → false_positive. Skips entries with empty finding_hash and logs any
 // hashes the agent emitted but that didn't match a row. The write is scoped to
-// the run's project (and agentic scan) so a hash shared with another project's
-// finding never flips that finding.
+// the run's project so a hash shared with another project's finding never flips
+// that finding. The agentic scan scope spans the run uuid plus every child run
+// (parent_run_uuid = the run uuid): autopilot spawns a child audit run that owns
+// the findings it imports, so writing only the parent's uuid would leave every
+// audit finding stuck at draft.
 func writeBackTriageVerdicts(ctx context.Context, repo *database.Repository, projectUUID, agenticScanUUID string, merged *TriageResult) {
 	if merged == nil {
 		return
+	}
+	// Resolve the child runs once per call. An empty agenticScanUUID (the
+	// pipeline path) leaves runUUIDs empty, which scopes the write by project
+	// alone — the pre-existing behaviour.
+	var runUUIDs []string
+	if agenticScanUUID != "" {
+		runUUIDs = append(runUUIDs, agenticScanUUID)
+		if children, err := repo.GetChildAgenticScans(ctx, agenticScanUUID); err != nil {
+			// Non-fatal: fall back to writing the parent run uuid only, exactly
+			// as this function behaved before child scoping existed.
+			zap.L().Debug("triage writeback: child run lookup failed; scoping to parent run only",
+				zap.String("agentic_scan_uuid", agenticScanUUID),
+				zap.Error(err))
+		} else {
+			for _, child := range children {
+				if child.UUID != "" {
+					runUUIDs = append(runUUIDs, child.UUID)
+				}
+			}
+		}
 	}
 	apply := func(items []TriagedFinding, status string) {
 		for _, t := range items {
 			if t.FindingHash == "" {
 				continue
 			}
-			rows, err := repo.UpdateFindingStatusByHash(ctx, projectUUID, agenticScanUUID, t.FindingHash, status)
+			// includeUnattributed: the triage reads findings project-wide, and
+			// pre-scan/passive findings carry no run uuid — without it their
+			// verdicts matched nothing and the rows kept the scanner's status.
+			rows, err := repo.UpdateFindingStatusByHashForRuns(ctx, projectUUID, runUUIDs, true, t.FindingHash, status)
 			if err != nil {
 				zap.L().Warn("triage writeback failed",
 					zap.String("finding_hash", t.FindingHash),
@@ -476,9 +502,15 @@ func writeBackTriageVerdicts(ctx context.Context, repo *database.Repository, pro
 				continue
 			}
 			if rows == 0 {
-				zap.L().Debug("triage writeback: no matching finding",
+				// A verdict that matched nothing is the symptom this scoping
+				// fix exists for: the triage judged a finding it cannot write.
+				// Keep it a warning so it stays visible in run logs.
+				zap.L().Warn("triage writeback failed",
 					zap.String("finding_hash", t.FindingHash),
-					zap.String("agentic_scan_uuid", agenticScanUUID))
+					zap.String("status", status),
+					zap.String("agentic_scan_uuid", agenticScanUUID),
+					zap.Int("run_uuids_tried", len(runUUIDs)),
+					zap.String("reason", "no matching finding across run scopes"))
 			}
 		}
 	}

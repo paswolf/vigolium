@@ -76,6 +76,7 @@ func TestDefaultAgentConfig_Olium(t *testing.T) {
 		"google_cloud_project", "google_cloud_location",
 		"reasoning_effort", "system_prompt", "max_tokens", "temperature",
 		"max_turns", "cache_size",
+		"section_max_turns", "stall_turns", "stall_rotations",
 	} {
 		if !oliumKeys[want] {
 			t.Errorf("expected agent.olium.%s to appear in flattened config (visible in `vigolium config ls olium`)", want)

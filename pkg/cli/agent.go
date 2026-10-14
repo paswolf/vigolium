@@ -288,7 +288,10 @@ func runAgentQuery(cmd *cobra.Command, args []string) error {
 	// The query's own agentic_scans row, so `agent session`, `log ls` and
 	// `finding --agentic-scan` find it like any other agent run. A dry run
 	// renders a prompt only and records nothing.
-	projectUUID, _ := resolveProjectUUID()
+	projectUUID, projectErr := resolveProjectUUID()
+	if projectErr != nil {
+		return fmt.Errorf("cannot scope this run to a project: %w", projectErr)
+	}
 	startedAt := time.Now()
 	if !agentDryRun {
 		_, model := settings.Agent.BackendMeta()

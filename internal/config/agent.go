@@ -91,6 +91,24 @@ type OliumConfig struct {
 	//     propose_candidate; only verified candidates become findings).
 	// Empty or any unrecognized value resolves to "legacy" via EffectiveAutopilotMode.
 	AutopilotMode string `yaml:"autopilot_mode"`
+
+	// SectionMaxTurns caps how many model turns one durable-autopilot section
+	// may take before the loop rotates to a fresh context (shadow / enforced
+	// modes only). 0 = package default 40.
+	SectionMaxTurns int `yaml:"section_max_turns"`
+	// StallTurns is how many consecutive turns without a productive tool call
+	// end a section. The progress detector only counts target-touching or
+	// result-recording tools (run_native_scan, web_fetch, send_raw_http,
+	// browser_probe, report_finding, ...), so an operator that verifies through
+	// bash — reading source, querying the target's database, replaying a
+	// request by hand — reads as stalled. Raise it on codebases that reward
+	// manual probing. 0 = package default 12.
+	StallTurns int `yaml:"stall_turns"`
+	// StallRotations is how many consecutive stall rotations are tolerated
+	// before a run is stopped rather than rotated again. 0 = package default 3.
+	// A run stopped this way still gets one report-only turn before the loop
+	// accepts the stop (see pkg/olium/autopilot.Options.NoFinalReportTurn).
+	StallRotations int `yaml:"stall_rotations"`
 }
 
 // Autopilot mode constants for OliumConfig.AutopilotMode. Exported so callers
@@ -684,6 +702,13 @@ func DefaultOliumConfig() OliumConfig {
 		CacheSize:       1024,
 		MaxConcurrent:   4,
 		CallTimeoutSec:  600, // 10 minutes per provider call
+
+		// Durable-autopilot section budgets; mirrored by the package defaults
+		// in pkg/olium/autopilot (section.go) so a bare Options{} behaves the
+		// same as a fully populated config.
+		SectionMaxTurns: 40,
+		StallTurns:      12,
+		StallRotations:  3,
 		CustomProvider: CustomProviderConfig{
 			BaseURL: "http://localhost:11434/v1",
 			ModelID: "gemma4:latest",

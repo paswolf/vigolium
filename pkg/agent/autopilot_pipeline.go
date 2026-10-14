@@ -64,6 +64,14 @@ type AutopilotPipelineConfig struct {
 	// Zero = no cap.
 	TokenBudget int64
 	MaxCostUSD  float64
+	// SectionMaxTurns / StallTurns / StallRotations tune the durable-autopilot
+	// section controller (agent.olium.section_max_turns / stall_turns /
+	// stall_rotations; shadow+enforced modes only). Zero falls back to the
+	// package defaults — 40 turns, 12 stalled turns, 3 stall rotations. See
+	// pkg/olium/autopilot/rotation.go for what counts as progress.
+	SectionMaxTurns int
+	StallTurns      int
+	StallRotations  int
 	// SkipPreflight skips the provider ping (--no-preflight).
 	SkipPreflight bool
 
@@ -447,6 +455,9 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 		SessionDir:           cfg.SessionDir,
 		MaxToolCalls:         cfg.MaxCommands,
 		MaxTurns:             cfg.MaxCommands,
+		MaxTurnsPerSection:   cfg.SectionMaxTurns,
+		StallTurns:           cfg.StallTurns,
+		MaxStallRotations:    cfg.StallRotations,
 		TokenBudget:          cfg.TokenBudget,
 		MaxCostUSD:           cfg.MaxCostUSD,
 		Out:                  streamWriter,
@@ -491,13 +502,6 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 			auditLogFn(fmt.Sprintf("%d/%d phases completed (status: %s)",
 				status.CompletedPhases, status.TotalPhases, status.Status))
 		}
-	}
-
-	verification := verifyAutopilotArtifacts(spec)
-	result.VerifiedFindingCount = verification.ConfirmedCount
-	result.Warnings = append(result.Warnings, verification.Warnings...)
-	if len(result.Warnings) > 0 {
-		result.Degraded = true
 	}
 
 	// Durable-autopilot verify-before-promote: in shadow/enforced mode, re-check
@@ -545,6 +549,29 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 			zap.L().Warn("Autopilot triage pass failed (scan results unaffected)", zap.Error(terr))
 			result.Warnings = append(result.Warnings, "triage pass failed: "+terr.Error())
 		}
+	}
+
+	// Derive findings.json / dismissed.json from the project DB when the
+	// operator left them absent. The artifacts are views of the rows this run
+	// already produced, so a run that did the work but reported nothing to the
+	// artifact is no longer degraded for it — and an operator-written file is
+	// never touched. Synthesis logs one line per file it writes.
+	//
+	// Deliberately after verify-before-promote and triage: both stages create
+	// or re-judge rows (promoted candidates, triage verdicts on the run's and
+	// its child runs' findings), and an artifact written before them would
+	// snapshot the run as emptier than it ended.
+	synthesis, synthErr := synthesizeAutopilotFindingArtifacts(ctx, r.repo, spec, cfg.ProjectUUID, cfg.ParentAgenticScanUUID, cfg.ScanUUID)
+	if synthErr != nil {
+		zap.L().Warn("failed to synthesize finding artifacts from the project DB", zap.Error(synthErr))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("failed to synthesize finding artifacts from the project DB: %v", synthErr))
+	}
+
+	verification := verifyAutopilotArtifacts(spec, synthesis)
+	result.VerifiedFindingCount = verification.ConfirmedCount
+	result.Warnings = append(result.Warnings, verification.Warnings...)
+	if len(result.Warnings) > 0 {
+		result.Degraded = true
 	}
 
 	emitProgress(&cfg, "autopilot", "autonomous session completed")
@@ -1074,9 +1101,16 @@ func writeCommonSections(b *strings.Builder, cfg AutopilotPipelineConfig, ac *au
 			if cfg.ContextBundle.PreparedAuth.SessionConfig != "" {
 				fmt.Fprintf(b, "- Session config artifact: `%s`\n", cfg.ContextBundle.PreparedAuth.SessionConfig)
 			}
+			if names := usableSessionNames(cfg); len(names) > 0 {
+				fmt.Fprintf(b, "- Usable auth sessions: %s\n", strings.Join(names, ", "))
+				b.WriteString("  - Those are the only session names that exist; `auth_session_lookup` rejects any other name.\n")
+			}
 			if len(cfg.ContextBundle.PreparedAuth.FocusRoutes) > 0 {
 				fmt.Fprintf(b, "- Focus routes: %s\n", strings.Join(cfg.ContextBundle.PreparedAuth.FocusRoutes, ", "))
 			}
+		}
+		if browserSessionUncaptured(cfg) {
+			b.WriteString("\n- browser session not captured — call `browser_auth` before probing authenticated routes.\n")
 		}
 		b.WriteString("\n")
 	}
@@ -1160,6 +1194,63 @@ func writeCommonSections(b *strings.Builder, cfg AutopilotPipelineConfig, ac *au
 		fmt.Fprintf(b, "- Evidence directory: `%s`\n\n", cfg.Artifacts.EvidenceDir)
 		b.WriteString("Every retained finding must include reproducible evidence. If you cannot support a finding with evidence, move it to the dismissed artifact.\n\n")
 	}
+}
+
+// usableSessionNames returns the names of the sessions this run actually
+// prepared. normalizeAutopilotSessionConfig drops entries it cannot validate,
+// so the names the brief lists are the complete, authoritative set — an
+// operator that never sees them guesses (`admin_backend`) and burns its run on
+// lookups that can only fail.
+func usableSessionNames(cfg AutopilotPipelineConfig) []string {
+	if cfg.SessionConfig == nil {
+		return nil
+	}
+	return agentSessionNames(cfg.SessionConfig.Sessions)
+}
+
+// browserSessionUncaptured reports whether the run's browser policy expects a
+// browser session that was never captured. Shipping browser-derived state is a
+// preflight outcome: when neither the preflight (source browser-auth) nor the
+// operator (a populated browser-session artifact) produced one, the brief has
+// to say so, or the operator reads `browser_recommended` and probes
+// authenticated routes with no session at all.
+func browserSessionUncaptured(cfg AutopilotPipelineConfig) bool {
+	if cfg.ContextBundle == nil {
+		return false
+	}
+	switch cfg.ContextBundle.BrowserDecision {
+	case "browser_required", "browser_recommended":
+	default:
+		return false
+	}
+	if p := cfg.PreparedAuth; p != nil && p.Source == "browser-auth" {
+		return false
+	}
+	return !browserSessionArtifactPopulated(cfg.Artifacts.BrowserSessionPath)
+}
+
+// browserSessionArtifactPopulated reports whether the browser-session artifact
+// holds a captured session. writePreparedAuthArtifacts seeds it with
+// status "pending"; any other non-empty status means somebody filled it in.
+func browserSessionArtifactPopulated(path string) bool {
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(data, &state) != nil {
+		return false
+	}
+	switch strings.TrimSpace(state.Status) {
+	case "", "pending":
+		return false
+	}
+	return true
 }
 
 // formatFindings formats audit findings for inclusion in the agent prompt.

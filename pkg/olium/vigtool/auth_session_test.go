@@ -91,3 +91,66 @@ func TestAuthToolMetadata(t *testing.T) {
 		}
 	}
 }
+
+// saveSessionHostnames writes the session rows a prepared auth state would
+// carry (two API sessions at one host), so the lookup tool has something
+// concrete to advertise on a miss.
+func saveSessionHostnames(t *testing.T, repo *database.Repository, projectUUID string) {
+	t.Helper()
+	rows := []*database.AuthenticationHostname{
+		{ProjectUUID: projectUUID, Hostname: "app.example.com", SessionName: "admin_api", SessionRole: "compare",
+			Headers: map[string]string{"Authorization": "Basic YWRtaW4="}},
+		{ProjectUUID: projectUUID, Hostname: "app.example.com", SessionName: "lowpriv_api", SessionRole: "compare",
+			Headers: map[string]string{"Authorization": "Basic bG93"}},
+	}
+	if err := repo.SaveAuthenticationHostnames(context.Background(), rows); err != nil {
+		t.Fatalf("SaveAuthenticationHostnames: %v", err)
+	}
+}
+
+// TestAuthSessionLookupUnknownNameListsConfiguredSessions locks the fix for the
+// operator that spent its run calling auth_session_lookup with `admin_backend`:
+// a wrong name must answer with the names that actually exist.
+func TestAuthSessionLookupUnknownNameListsConfiguredSessions(t *testing.T) {
+	repo := newVigtoolTestRepo(t)
+	ctx := context.Background()
+	project := database.DefaultProjectUUID
+	saveSessionHostnames(t, repo, project)
+
+	tool := NewAuthSessionLookupTool(&SessionsContext{Repo: repo, ProjectUUID: project})
+	res, err := tool.Execute(ctx, map[string]any{"hostname": "app.example.com", "name": "admin_backend"}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("a wrong session name must error, got %q", res.Content)
+	}
+	const want = `auth_session_lookup: no session named "admin_backend"; available: admin_api, lowpriv_api`
+	if res.Content != want {
+		t.Errorf("Content = %q, want %q", res.Content, want)
+	}
+}
+
+// TestAuthSessionLookupUnknownHostnameListsProjectSessions covers the other
+// guessing mode — probing a host that has no sessions — where the answer has to
+// include the host so the caller can retry in the right place.
+func TestAuthSessionLookupUnknownHostnameListsProjectSessions(t *testing.T) {
+	repo := newVigtoolTestRepo(t)
+	ctx := context.Background()
+	project := database.DefaultProjectUUID
+	saveSessionHostnames(t, repo, project)
+
+	tool := NewAuthSessionLookupTool(&SessionsContext{Repo: repo, ProjectUUID: project})
+	res, err := tool.Execute(ctx, map[string]any{"hostname": "other.example.com"}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("an unknown hostname with project sessions must error, got %q", res.Content)
+	}
+	const want = "auth_session_lookup: no auth session for other.example.com; available: " +
+		"admin_api@app.example.com, lowpriv_api@app.example.com"
+	if res.Content != want {
+		t.Errorf("Content = %q, want %q", res.Content, want)
+	}
+}

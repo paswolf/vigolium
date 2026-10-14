@@ -242,10 +242,70 @@ The autopilot exits in one of four ways:
    in-flight tools; autopilot returns the wrapped `context.DeadlineExceeded` /
    `context.Canceled` error.
 
+### Report-only turn
+
+When a run is *stopped* rather than *finished* — the stall guard tripping (see
+[Stall detection and section budgets](#stall-detection-and-section-budgets)) or
+the engine giving up on its own (item 2) — and nothing has been reported yet,
+the loop grants exactly one more turn before accepting the stop. The engine
+context is reset and the operator receives a report-only mission that names the
+durable evidence (the run's `transcript.jsonl`, the spilled `tool-results/`,
+the scratchpad) and requires `report_finding` for everything actually verified,
+followed by the `findings.json` / `dismissed.json` artifacts.
+
+This exists because a stopped run used to end with whatever the operator had
+already reported — nothing, when its verification happened through `bash` (see
+the progress definition below). The turn is skipped when the stop was
+budget-driven (the cap behind it is already spent), when at least one finding
+was already reported, and when the caller sets `Options.NoFinalReportTurn`.
+
+Two properties make the turn actually usable:
+
+- It is **exempt from the stall guard** (the same progress definition below) —
+  recovering evidence by reading the transcript looks unproductive, and without
+  the exemption the guard killed the rescue after a single read.
+- It is the run's **last act**: when it reaches a section limit the run ends
+  rather than rotating into a fresh mission that drops the report instruction.
+
+The `findings.json` / `dismissed.json` artifacts are synthesized **after**
+verify-before-promote and triage, so the file reflects the run's judged
+findings rather than the state before those stages ran.
+
 A separate **finding rate-limit** lives inside `report_finding`:
 - soft warning at 50 findings (still saved)
 - hard cap at 200 (rejected with an `IsError` result that nudges the model
   toward `halt_scan`)
+
+---
+
+## Stall detection and section budgets
+
+`autopilot_mode: shadow|enforced` runs the operator in bounded **sections**: a
+fresh context every `MaxTurnsPerSection` turns, or sooner when the operator
+stops making progress. "Progress" is deliberately narrow — only tools that touch
+the target or record a result count:
+
+`run_native_scan`, `run_extension`, `run_module`, `browser_probe`, `web_fetch`,
+`replay_request`, `send_raw_http`, `browser_auth`, `report_finding`,
+`propose_candidate`.
+
+Everything else — `bash`, `read_file`, `grep`, `query_records`,
+`list_findings`, `auth_session_lookup`, `update_plan`, `remember` — is
+inspection or bookkeeping, so reading source, querying the target's database
+through `bash`, or replaying a request by hand counts as *no* progress even when
+it is exactly how a bug gets verified.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `agent.olium.section_max_turns` | 40 | Turns before a section rotates unconditionally. |
+| `agent.olium.stall_turns` | 12 | Consecutive turns with no productive tool call that end a section. |
+| `agent.olium.stall_rotations` | 3 | Consecutive stall rotations tolerated before the run is stopped instead of rotated again. |
+
+A run stopped by the rotation limit is not finished: it takes the
+[report-only turn](#report-only-turn) described above, so verified work still
+lands as findings. Raise `stall_turns` / `stall_rotations` on codebases that
+reward manual verification over tool-driven probing. The knobs are no-ops for
+`legacy` runs, which never rotate.
 
 ---
 

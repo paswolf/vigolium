@@ -25,6 +25,15 @@ const (
 	HaltSourceModel
 	// HaltSourceBudget was set by the outer loop's wall-time or token cap.
 	HaltSourceBudget
+	// HaltSourceStall was set by the durable-autopilot stall guard after the
+	// operator produced no productive tool call across several consecutive
+	// sections. Unlike a budget stop none of the run's caps are spent, which
+	// is what lets the loop still afford a bounded report-only turn.
+	HaltSourceStall
+	// HaltSourceReport was set by the outer loop when the report-only turn
+	// finished its section budget: the run is over and no re-entry — report or
+	// coverage — should try again.
+	HaltSourceReport
 )
 
 // HaltSignal is a thread-safe halt flag shared between the halt_scan tool
@@ -64,6 +73,20 @@ func (h *HaltSignal) SetByModel(reason string) {
 // SetByModel.
 func (h *HaltSignal) SetByBudget(reason string) {
 	h.set(reason, HaltSourceBudget)
+}
+
+// SetByStall marks the signal as halted on behalf of the durable-autopilot
+// stall guard. Same idempotency contract as SetByModel. Kept distinct from
+// SetByBudget so the outer loop can tell a stopped run (caps unspent, a
+// report-only turn is still affordable) from a spent one.
+func (h *HaltSignal) SetByStall(reason string) {
+	h.set(reason, HaltSourceStall)
+}
+
+// SetByReport marks the signal as halted because the report-only turn is done.
+// Same idempotency contract as SetByModel.
+func (h *HaltSignal) SetByReport(reason string) {
+	h.set(reason, HaltSourceReport)
 }
 
 func (h *HaltSignal) set(reason string, src HaltSource) {

@@ -422,7 +422,10 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		if verr != nil {
 			return usageErrorf("--burp-bridge-url: %w", verr)
 		}
-		projectUUID, _ := resolveProjectUUID()
+		projectUUID, projectErr := resolveProjectUUID()
+		if projectErr != nil {
+			return fmt.Errorf("--burp-bridge-url: cannot resolve project: %w", projectErr)
+		}
 		fmt.Fprintf(os.Stderr, "%s Importing live bridge traffic from %s ...\n",
 			terminal.InfoSymbol(), terminal.Cyan(validated))
 		res, ierr := importBurpTrafficToDB(context.Background(), repo, validated,
@@ -511,7 +514,10 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		// Pass the active project so --project-uuid (or --project-name) can
 		// override the project component parsed from the gs:// URI, matching
 		// audit/swarm/scan behavior.
-		projectUUID, _ := resolveProjectUUID()
+		projectUUID, projectErr := resolveProjectUUID()
+		if projectErr != nil {
+			return fmt.Errorf("failed to resolve project for gs:// source: %w", projectErr)
+		}
 		extractedPath, cleanup, gcsErr := storage.ResolveGCSSource(&settings.Storage, autopilotSource, projectUUID)
 		if gcsErr != nil {
 			return fmt.Errorf("failed to resolve gs:// source: %w", gcsErr)

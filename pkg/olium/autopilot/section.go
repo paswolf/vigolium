@@ -76,6 +76,13 @@ type SectionController struct {
 	MaxStallRotations   int   // 0 = disabled; consecutive stall rotations before halting
 	ContextTokenSoftCap int64 // 0 = disabled; caller passes a fraction of the model ceiling
 
+	// SuppressStalls disables the stall trigger (turns without a productive
+	// tool call) while leaving the turn and token caps in force. The outer loop
+	// sets it for the report-only turn: recovering evidence from the run
+	// transcript looks unproductive to the detector, and cutting that turn off
+	// before it can report defeats its whole purpose.
+	SuppressStalls bool
+
 	seq          int
 	current      *sectionState
 	stallCounter int
@@ -188,6 +195,16 @@ func (c *SectionController) BeginSection(ctx context.Context, task, kind string)
 //
 // Call once per completed turn (at EventTurnDone).
 func (c *SectionController) ShouldRotate(turnsThisSection int, tokensThisSection int64, progressed bool) (bool, string) {
+	if c.SuppressStalls {
+		// Report-only section: bounded by the turn and token caps alone.
+		if c.MaxTurnsPerSection > 0 && turnsThisSection >= c.MaxTurnsPerSection {
+			return true, rotationReasonTurnCap
+		}
+		if c.ContextTokenSoftCap > 0 && tokensThisSection >= c.ContextTokenSoftCap {
+			return true, rotationReasonTokenCap
+		}
+		return false, ""
+	}
 	if progressed {
 		c.stallCounter = 0
 		c.stallRotations = 0
@@ -209,9 +226,25 @@ func (c *SectionController) ShouldRotate(turnsThisSection int, tokensThisSection
 
 // StalledOut reports whether the run has rotated on a stall
 // MaxStallRotations times with no productive turn in between, meaning a
-// fresh section is not going to help and the run should halt.
+// fresh section is not going to help and the run should halt. Always false
+// once SuppressStalls is set (a later turn-cap rotation must not be mistaken
+// for the stall streak that already stopped the run once).
 func (c *SectionController) StalledOut() bool {
+	if c.SuppressStalls {
+		return false
+	}
 	return c.MaxStallRotations > 0 && c.stallRotations >= c.MaxStallRotations
+}
+
+// SuppressStallGuard disables the stall trigger for the rest of the run and
+// clears the accumulated stall state. Used by the outer loop for the
+// report-only turn, whose recovery reads (transcript, scratchpad) look
+// unproductive to the progress detector: without this the guard killed the
+// rescue turn before it could report, which is the whole point of the turn.
+func (c *SectionController) SuppressStallGuard() {
+	c.SuppressStalls = true
+	c.stallCounter = 0
+	c.stallRotations = 0
 }
 
 // EndSection closes the current section: updates the row (status, rotation

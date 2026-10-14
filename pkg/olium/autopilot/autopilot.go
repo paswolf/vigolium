@@ -283,6 +283,36 @@ type Options struct {
 	// 0 falls back to defaultPostHaltGapThreshold (5).
 	PostHaltGapThreshold int
 
+	// NoFinalReportTurn disables the report-only re-entry. By default a run
+	// that is stopped rather than finished — the stall guard tripping, or the
+	// engine ending on its own — and that has reported nothing re-enters ONCE
+	// with a reset context and a report-only mission: recover the evidence
+	// from the session transcript, call report_finding for everything
+	// verified, then write the findings.json / dismissed.json artifacts.
+	//
+	// It exists because the stall detector's notion of progress only counts
+	// target-touching or result-recording tools (see productiveTools): an
+	// operator that verifies a bug through bash — reading source, querying the
+	// target's database, replaying a request by hand — looks stalled, and the
+	// run used to end with its verified evidence stranded in the transcript
+	// and nothing reported. The turn is bounded by the run's own turn cap and
+	// only fires when no cap was spent, so it cannot extend a budget stop.
+	NoFinalReportTurn bool
+
+	// MaxTurnsPerSection, StallTurns and MaxStallRotations tune the durable
+	// section controller (shadow/enforced modes; ignored in legacy). Zero
+	// values fall back to the package defaults — 40 turns per section, 12
+	// consecutive unproductive turns before a rotation, 3 stall rotations
+	// before the run is stopped.
+	//
+	// They exist because the stall detector's notion of progress is narrow (see
+	// productiveTools): an operator that verifies through bash does real work
+	// the detector cannot see, so a codebase that rewards manual probing may
+	// want a longer leash rather than the default three strikes.
+	MaxTurnsPerSection int
+	StallTurns         int
+	MaxStallRotations  int
+
 	// CoverageProbe is the probe used to verify coverage after halt. The
 	// pipeline runner builds one from the autopilot's Repo + ProjectUUID +
 	// Target; direct CLI callers can leave it nil to disable post-halt
@@ -927,6 +957,44 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	stalled := false
 	nextPrompt := initial
 
+	// --- Final report turn (see Options.NoFinalReportTurn) ---
+	// A run that is stopped rather than finished — the stall guard tripping, or
+	// the engine giving up on its own — used to end with whatever the operator
+	// had already reported. For a bash-heavy investigation that is nothing even
+	// when real issues were verified, because the stall detector only counts
+	// target-touching / result-recording tools as progress. Grant exactly one
+	// report-only turn (fresh context, evidence recovered from the transcript)
+	// before accepting the stop.
+	finalReportTried := false
+	finalReportDue := func(src HaltSource) bool {
+		if opts.NoFinalReportTurn || finalReportTried || reportCtx.Count.Load() > 0 {
+			return false
+		}
+		// Only stalls and silent engine stops qualify. A budget halt means the
+		// cap behind it is already spent, and extra turns would violate it.
+		return src == HaltSourceStall || src == HaltSourceUnset
+	}
+	reenterForFinalReport := func(reason string, ctrl *SectionController) {
+		finalReportTried = true
+		if reason == "" {
+			reason = "engine stopped without a halt signal"
+		}
+		if firstHaltReason == "" {
+			firstHaltReason = reason
+		}
+		_, _ = fmt.Fprintf(opts.ToolLog, "[autopilot] run stopped (%s) with 0 findings reported — re-entering once for a report-only turn\n", reason)
+		// The rescue turn is mandated and bounded, and recovering evidence from
+		// the transcript looks unproductive to the stall detector — without
+		// this the guard killed the turn after a single read (observed live), so
+		// the run ended having reported nothing anyway.
+		if ctrl != nil {
+			ctrl.SuppressStallGuard()
+		}
+		halt.Reset()
+		eng.Reset()
+		nextPrompt = buildFinalReportPrompt(opts)
+	}
+
 	// --- Durable-autopilot section-rotation state (non-legacy modes only) ---
 	// Every variable here is inert in legacy: rotationEnabled is false, so
 	// runIteration never touches them and the outer loop's handoff branch is
@@ -944,7 +1012,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	var rotationReason string
 	if rotationEnabled {
 		controller = NewSectionController(opts.SessionDir, opts.Repo, opts.ProjectUUID, opts.AgenticScanUUID,
-			scratch, sectionRec, DefaultMaxTurnsPerSection, DefaultStallTurns, 0)
+			scratch, sectionRec, opts.MaxTurnsPerSection, opts.StallTurns, 0)
+		if opts.MaxStallRotations > 0 {
+			controller.MaxStallRotations = opts.MaxStallRotations
+		}
 		missionBrief = buildRotationMission(opts)
 		firstTask := scratch.NextOpenTask()
 		if firstTask == "" {
@@ -1098,17 +1169,25 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 				// halt/budget already cancelled this turn.
 				if rotationEnabled && controller != nil && !pendingRotation && iterCtx.Err() == nil {
 					if rotate, reason := controller.ShouldRotate(sectionTurns, sectionIn+sectionOut, progressedThisWindow); rotate {
-						// A stall that survives repeated fresh starts is
-						// terminal. Rotation resets the stall counter and
-						// re-enters, so without this a model stuck on a
-						// broken tool contract rotates until the wall clock
-						// ends the run - with nothing to show for the hours.
-						if controller.StalledOut() {
+						switch {
+						case finalReportTried:
+							// The report-only turn is the run's last act: a
+							// section limit must end the run, not rotate into a
+							// fresh mission that drops the report instruction.
+							reportDone := fmt.Sprintf("report-only turn reached its section limit (%s)", reason)
+							halt.SetByReport(reportDone)
+							_, _ = fmt.Fprintf(opts.ToolLog, "[autopilot] %s — ending the run\n", reportDone)
+						case controller.StalledOut():
+							// A stall that survives repeated fresh starts is
+							// terminal. Rotation resets the stall counter and
+							// re-enters, so without this a model stuck on a
+							// broken tool contract rotates until the wall clock
+							// ends the run - with nothing to show for the hours.
 							haltReason := fmt.Sprintf("no productive tool call across %d consecutive sections (%s) - halting rather than rotating again",
 								controller.MaxStallRotations, reason)
-							halt.SetByBudget(haltReason)
+							halt.SetByStall(haltReason)
 							_, _ = fmt.Fprintf(opts.ToolLog, "[autopilot] %s\n", haltReason)
-						} else {
+						default:
 							pendingRotation = true
 							rotationReason = reason
 							_, _ = fmt.Fprintf(opts.ToolLog, "[autopilot] section %d rotating (%s, turns=%d) — rebuilding context\n",
@@ -1248,11 +1327,23 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			// Engine stopped on its own (e.g. NudgeOnEmptyToolCalls exhausted)
 			// without a halt signal. Treat as natural completion; no
 			// verification re-entry because there's no model-driven halt to
-			// double-check.
+			// double-check — but a silent stop that reported nothing still gets
+			// the one report-only turn.
+			if finalReportDue(HaltSourceUnset) {
+				reenterForFinalReport(reason, controller)
+				continue
+			}
 			break
 		}
 		haltSrc := halt.Source()
 		if !verifyEnabled || haltSrc != HaltSourceModel || reentries >= maxPostHaltReentries {
+			// A stopped run is not necessarily a finished one: when the stall
+			// guard tripped (or the engine gave up) with nothing reported, give
+			// the operator one report-only turn before accepting the stop.
+			if finalReportDue(haltSrc) {
+				reenterForFinalReport(reason, controller)
+				continue
+			}
 			break
 		}
 
@@ -1353,6 +1444,54 @@ func (r *Result) Diagnosis() string {
 		return "the model stopped calling tools and ignored every nudge to continue or halt, so coverage is likely incomplete"
 	}
 	return ""
+}
+
+// buildFinalReportPrompt is the user-role mission for the one report-only turn
+// granted to a run that is being stopped with nothing reported (see
+// Options.NoFinalReportTurn). The engine context is reset before this prompt,
+// so it tells the operator where the durable evidence lives instead of
+// assuming recall: the run's own transcript, the scratchpad, and the spilled
+// tool results. Kept in-package for the same reason as
+// formatCoverageGapPrompt — pkg/agent imports us.
+func buildFinalReportPrompt(opts Options) string {
+	var b strings.Builder
+	b.WriteString("# Final turn: report what you verified, then stop\n\n")
+	b.WriteString("This run is being stopped and not a single finding has been reported. Your conversation context has been reset, so recover the facts from the durable record of this run rather than from memory:\n\n")
+	if opts.SessionDir != "" {
+		fmt.Fprintf(&b, "- Full transcript of this run (every tool call and result, including spilled output): `%s`\n",
+			filepath.Join(opts.SessionDir, "transcript.jsonl"))
+		fmt.Fprintf(&b, "- Oversized tool results spilled earlier: `%s`\n",
+			filepath.Join(opts.SessionDir, "tool-results"))
+		fmt.Fprintf(&b, "- Working notes and candidates: `%s`\n",
+			filepath.Join(opts.SessionDir, "autopilot", "scratchpad.json"))
+	}
+	if opts.Target != "" {
+		fmt.Fprintf(&b, "- Target: %s\n", opts.Target)
+	}
+	if opts.SourcePath != "" {
+		fmt.Fprintf(&b, "- Source: %s\n", opts.SourcePath)
+	}
+	b.WriteString("\nThe transcript is large — search it (grep) for the probes, requests, and file reads that produced evidence.\n\n")
+	b.WriteString("Do this, in order:\n\n")
+	b.WriteString("1. Recover what you verified, from that transcript.\n")
+	// Enforced mode replaces report_finding with propose_candidate (a fresh
+	// verifier promotes the confirmed candidates into findings), so the
+	// report-only turn has to name the tool that mode actually registers.
+	findingTool, findingVerb := "report_finding", "report"
+	if config.NormalizeAutopilotMode(opts.Mode) == config.AutopilotModeEnforced {
+		findingTool, findingVerb = "propose_candidate", "propose"
+	}
+	fmt.Fprintf(&b, "2. Call `%s` once per issue you actually verified — title, severity, confidence, description, remediation, and the evidence you observed (request/response, `file:line`, database output). %s only what your own tool results show: inventing findings is worse than reporting none.\n",
+		findingTool, strings.ToUpper(findingVerb[:1])+findingVerb[1:])
+	if opts.SessionDir != "" {
+		fmt.Fprintf(&b, "3. Write both artifacts with `write_file`: `%s` — a JSON array holding one object per finding you just reported — and `%s` — a JSON array of what you checked and ruled out, one line of reason each. Write `[]` when a list is empty.\n",
+			filepath.Join(opts.SessionDir, "autopilot", "findings.json"),
+			filepath.Join(opts.SessionDir, "autopilot", "dismissed.json"))
+	} else {
+		b.WriteString("3. Write the findings and dismissed artifacts with `write_file`, at the paths given in your brief.\n")
+	}
+	b.WriteString("\nDo not start new investigations, do not run new scans, and do not call halt_scan. Reporting is the entire task: a handful of tool calls, then stop.\n")
+	return b.String()
 }
 
 // formatCoverageGapPrompt builds the user-role message the engine sees on a
