@@ -353,10 +353,14 @@ Conflict hotspots (rebasing: expect these, they are the ones that touch hot code
 After the rebase:
 
 ```bash
+make build                           # FIRST. Bootstraps the generated blobs:
+                                     #   internal/resources/deparos/jstangle/*.pin+.zst
+                                     #   are gitignored and produced by `make deps`,
+                                     #   so a bare `go build ./...` on a fresh clone
+                                     #   fails on the embed directive.
 make test-unit                       # repo suite
 go test ./pkg/olium/autopilot/ ./pkg/agent/ ./pkg/database/ ./internal/config/ ./pkg/cli/ -count=1
 ./vigolium-tuning.sh                 # config-side settings (run from the scan dir)
-make build                           # never build to an ad-hoc path: version injection
 vigolium config ls olium | grep stall_turns   # patch 6 present?
 ```
 
