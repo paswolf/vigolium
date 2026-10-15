@@ -287,13 +287,18 @@ the target or record a result count:
 
 `run_native_scan`, `run_extension`, `run_module`, `browser_probe`, `web_fetch`,
 `replay_request`, `send_raw_http`, `browser_auth`, `report_finding`,
-`propose_candidate`.
+`propose_candidate` — plus one derived case: a **`bash` turn that speaks HTTP to
+an in-scope host**, i.e. the command names an HTTP client (`curl`, `wget`,
+`httpie`, `httpx`, `hurl`, `ncat`, `netcat`) *and* the run's target or a scope
+host. That is how an operator replays a request or probes with a harvested
+session cookie from the shell, and it is target-facing work.
 
-Everything else — `bash`, `read_file`, `grep`, `query_records`,
-`list_findings`, `auth_session_lookup`, `update_plan`, `remember` — is
-inspection or bookkeeping, so reading source, querying the target's database
-through `bash`, or replaying a request by hand counts as *no* progress even when
-it is exactly how a bug gets verified.
+Everything else — a `bash` turn that only reads source or greps for a URL, plus
+`read_file`, `grep`, `query_records`, `list_findings`, `auth_session_lookup`,
+`update_plan`, `remember`, and querying the target's database through
+`docker exec` — is inspection or bookkeeping, and counts as *no* progress even
+when it is exactly how a bug gets verified. For those investigation styles, widen
+the leash instead:
 
 | Setting | Default | Effect |
 | --- | --- | --- |

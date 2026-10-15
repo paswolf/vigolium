@@ -1048,6 +1048,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		var runLoopErr error
 		var fatalResult *Result
 
+		// EventToolExecEnd carries no args, so the bash command that decides
+		// progress is stashed when its call starts. Per-iteration on purpose: a
+		// tool call cannot outlive the iteration that dispatched it.
+		pendingToolArgs := map[string]map[string]any{}
+		targetHosts := progressTargetHosts(opts.Target, opts.Scope)
+
 		for ev := range events {
 			// Tool exec lifecycle is always echoed on the tool log; the
 			// per-turn usage line is gated on hadTextThisTurn below so we
@@ -1066,8 +1072,18 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			// creates surface / mutates durable state / records a result counts
 			// as progress (resets the stall counter); every tool result feeds
 			// the recent-actions ring carried into the next section's brief.
+			//
+			// The decision needs the call's arguments, which only the start
+			// event carries — a bash turn that curls an in-scope host counts as
+			// progress (see productiveCall), and its command is only visible
+			// there.
+			if rotationEnabled && ev.Type == engine.EventToolExecStart && ev.ToolCallID != "" {
+				pendingToolArgs[ev.ToolCallID] = ev.ToolArgs
+			}
 			if rotationEnabled && ev.Type == engine.EventToolExecEnd {
-				if !ev.ToolIsErr && productiveTools[ev.ToolName] {
+				args := pendingToolArgs[ev.ToolCallID]
+				delete(pendingToolArgs, ev.ToolCallID)
+				if !ev.ToolIsErr && productiveCall(ev.ToolName, args, targetHosts) {
 					progressedThisWindow = true
 				}
 				recentActions = appendRecentAction(recentActions, ev.ToolName, ev.ToolResult)

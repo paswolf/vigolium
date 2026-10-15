@@ -184,6 +184,17 @@ func runAgentSession(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runMessageLabel names the heading for a run's stored message and reports
+// whether it is a warning list rather than an error. A run that finished with
+// warnings stores them in the same field a failed run stores its error, so the
+// heading has to follow the status — otherwise a successful run reads as broken.
+func runMessageLabel(status string) (label string, isWarning bool) {
+	if status == "completed_with_warnings" {
+		return "Warnings", true
+	}
+	return "Error", false
+}
+
 func showAgentSessionDetail(cmd *cobra.Command, ctx context.Context, repo *database.Repository, uuid string) error {
 	run, err := repo.GetAgenticScan(ctx, uuid)
 	if err != nil {
@@ -361,9 +372,16 @@ func showAgentSessionDetail(cmd *cobra.Command, ctx context.Context, repo *datab
 		}
 	}
 
-	// Error message
+	// Error / warnings. A run that finished with warnings keeps them in the same
+	// field a failed run keeps its error, so the heading follows the status: a
+	// completed run whose warning list is rendered as "Error" reads as broken.
 	if run.ErrorMessage != "" {
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n", terminal.Red(terminal.SymbolError), terminal.BoldRed("Error"))
+		label, isWarning := runMessageLabel(run.Status)
+		if isWarning {
+			fmt.Fprintf(os.Stderr, "\n  %s %s\n", terminal.Orange(terminal.WarningSymbol()), terminal.BoldOrange(label))
+		} else {
+			fmt.Fprintf(os.Stderr, "\n  %s %s\n", terminal.Red(terminal.SymbolError), terminal.BoldRed(label))
+		}
 		fmt.Fprintf(os.Stderr, "    %s\n", run.ErrorMessage)
 	}
 
@@ -467,7 +485,12 @@ func printChildRunDetail(child *database.AgenticScan, tailLines int) {
 
 	// Error
 	if child.ErrorMessage != "" {
-		fmt.Fprintf(os.Stderr, "    %-17s %s\n", terminal.Gray("Error:"), terminal.Red(child.ErrorMessage))
+		label, isWarning := runMessageLabel(child.Status)
+		if isWarning {
+			fmt.Fprintf(os.Stderr, "    %-17s %s\n", terminal.Gray(label+":"), terminal.Orange(child.ErrorMessage))
+		} else {
+			fmt.Fprintf(os.Stderr, "    %-17s %s\n", terminal.Gray(label+":"), terminal.Red(child.ErrorMessage))
+		}
 	}
 
 	// Session directory listing
