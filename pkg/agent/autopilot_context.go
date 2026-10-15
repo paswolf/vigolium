@@ -671,29 +671,40 @@ func countEvidenceBackedFindings(path string, evidenceDir string) (int, string) 
 		return 0, fmt.Sprintf("failed to read %s: %v", filepath.Base(path), err)
 	}
 
-	var arr []map[string]any
-	if err := json.Unmarshal(data, &arr); err != nil {
+	// Accept both documented shapes — a flat array, or an object wrapping a
+	// "findings" array — and let entries be any JSON value, because the
+	// operator's dismissed.json is a flat list of ruled-out reasons as plain
+	// strings. Rejecting that shape turned a complete run into
+	// "failed to parse dismissed.json as findings artifact" even though every
+	// dismissal was present.
+	var items []any
+	if err := json.Unmarshal(data, &items); err != nil {
 		var wrapper struct {
-			Findings []map[string]any `json:"findings"`
+			Findings []any `json:"findings"`
 		}
 		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
 			return 0, fmt.Sprintf("failed to parse %s as findings artifact", filepath.Base(path))
 		}
-		arr = wrapper.Findings
+		items = wrapper.Findings
 	}
 
 	count := 0
-	for _, item := range arr {
-		if evidenceDir == "" {
-			count++
+	for _, raw := range items {
+		item, isObject := raw.(map[string]any)
+		if !isObject {
+			// No evidence fields to inspect on a plain string, so it counts
+			// only where no evidence check applies (the dismissed artifact).
+			if evidenceDir == "" {
+				count++
+			}
 			continue
 		}
-		if hasEvidence(item, evidenceDir) {
+		if evidenceDir == "" || hasEvidence(item, evidenceDir) {
 			count++
 		}
 	}
-	if len(arr) > count {
-		return count, fmt.Sprintf("%s contains %d entries without evidence references", filepath.Base(path), len(arr)-count)
+	if len(items) > count {
+		return count, fmt.Sprintf("%s contains %d entries without evidence references", filepath.Base(path), len(items)-count)
 	}
 	return count, ""
 }
@@ -708,11 +719,20 @@ func hasEvidence(item map[string]any, evidenceDir string) bool {
 			return true
 		}
 	}
-	if raw, ok := item["evidence_files"]; ok {
-		switch files := raw.(type) {
+	// Reference lists: a linked record is the evidence for a finding that cites
+	// one, even when the body itself was not inlined (the operator reports a
+	// finding with `http_record_uuids` far more often than with whole bodies).
+	for _, key := range []string{"evidence_files", "http_record_uuids", "evidence_record_uuids"} {
+		switch refs := item[key].(type) {
 		case []any:
-			for _, f := range files {
-				if strings.TrimSpace(fmt.Sprint(f)) != "" {
+			for _, r := range refs {
+				if strings.TrimSpace(fmt.Sprint(r)) != "" {
+					return true
+				}
+			}
+		case []string:
+			for _, r := range refs {
+				if strings.TrimSpace(r) != "" {
 					return true
 				}
 			}
