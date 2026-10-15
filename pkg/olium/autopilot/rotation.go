@@ -41,6 +41,157 @@ var productiveTools = map[string]bool{
 	"propose_candidate": true,
 }
 
+// httpBashClients are the command names that, run through bash, put requests on
+// the wire. Their presence is what separates a target-facing shell turn from
+// bookkeeping.
+//
+// Deliberately narrow: bare `http`, `nc` and `python` occur in prose, URLs and
+// filenames often enough that a substring match on them means nothing.
+var httpBashClients = []string{"curl", "wget", "httpie", "httpx", "hurl", "ncat", "netcat"}
+
+// productiveCall reports whether a finished tool call counts as progress for the
+// stall detector. It extends productiveTools with the one case the static map
+// cannot express: a bash turn that speaks HTTP to an in-scope host.
+//
+// Without it an operator that verifies through the shell — `curl` with a
+// harvested session cookie, say — reads as stalled even though it is probing the
+// target, which is exactly the work the detector exists to encourage. The
+// command has to name both an HTTP client and one of the run's hosts, so reading
+// source, grepping for a URL, or querying the target's database through
+// `docker exec` still counts as no progress.
+func productiveCall(name string, args map[string]any, hosts []string) bool {
+	if productiveTools[name] {
+		return true
+	}
+	if name != "bash" {
+		return false
+	}
+	command, _ := args["command"].(string)
+	return bashTargetsHost(command, hosts)
+}
+
+// bashTargetsHost reports whether command speaks HTTP to one of hosts. Matching
+// is textual on purpose — the command is a shell string, not an argv — so a
+// command that only quotes a target URL in a search pattern is filtered out by
+// the client-name requirement rather than by parsing.
+func bashTargetsHost(command string, hosts []string) bool {
+	if command == "" || len(hosts) == 0 {
+		return false
+	}
+	if !containsWord(command, httpBashClients...) {
+		return false
+	}
+	lower := strings.ToLower(command)
+	for _, h := range hosts {
+		if h != "" && strings.Contains(lower, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsWord reports whether s contains any of words as a whole word, so
+// "curl" matches `curl -s` but not `curl_to_json.py`.
+func containsWord(s string, words ...string) bool {
+	lower := strings.ToLower(s)
+	for _, w := range words {
+		for idx := 0; idx < len(lower); {
+			i := strings.Index(lower[idx:], w)
+			if i < 0 {
+				break
+			}
+			start := idx + i
+			end := start + len(w)
+			if !isWordByte(lower, start-1) && !isWordByte(lower, end) {
+				return true
+			}
+			idx = end
+		}
+	}
+	return false
+}
+
+// isWordByte reports whether s[i] is a character that would make a match part of
+// a longer word (`_`, `-`, letters, digits).
+func isWordByte(s string, i int) bool {
+	if i < 0 || i >= len(s) {
+		return false
+	}
+	c := s[i]
+	return c == '_' || c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}
+
+// progressTargetHosts turns the run's target and scope into the lowercase host
+// strings a bash command must name to count as target-facing progress. Loopback
+// aliases are included because an operator told `http://localhost` may write
+// 127.0.0.1 (or [::1]) in the shell.
+func progressTargetHosts(target string, scope []string) []string {
+	seen := map[string]bool{}
+	var hosts []string
+	addHost := func(raw string) {
+		primary := normalizeHostString(raw)
+		if primary == "" {
+			return
+		}
+		aliases := []string{primary}
+		switch primary {
+		case "localhost":
+			aliases = append(aliases, "127.0.0.1", "[::1]")
+		case "127.0.0.1":
+			aliases = append(aliases, "localhost", "[::1]")
+		}
+		for _, a := range aliases {
+			if !seen[a] {
+				seen[a] = true
+				hosts = append(hosts, a)
+			}
+		}
+	}
+	addHost(target)
+	for _, s := range scope {
+		addHost(s)
+	}
+	return hosts
+}
+
+// normalizeHostString reduces a target URL or scope pattern to the substring a
+// shell command would carry: no scheme, no userinfo, no port, no path, no
+// wildcard prefix.
+func normalizeHostString(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.LastIndex(s, ":"); i > 0 && allDigits(s[i+1:]) {
+		s = s[:i]
+	}
+	s = strings.TrimPrefix(s, "*.")
+	s = strings.TrimPrefix(s, ".")
+	return strings.TrimSuffix(s, ".")
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits (a port).
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // buildRotationMission assembles the compact mission line reused at the top of
 // every reconstructed brief. The heavy detail (plan, notes, stop criteria)
 // lives in the durable scratchpad, so this stays short — the whole point of
