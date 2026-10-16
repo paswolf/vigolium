@@ -37,7 +37,7 @@ sync:
 
 # make main a pristine copy of upstream again (drops local commits on main)
 reset-main:
-    git switch main
+    git co main
     git reset --hard {{upstream}}/main
     @echo "main == upstream/main. Publish with: git push --force-with-lease origin main"
 
@@ -46,7 +46,7 @@ rebase: _clean
     #!/usr/bin/env bash
     set -euo pipefail
     base=$(git describe --tags --abbrev=0 "{{upstream}}/main")
-    git switch "{{stack}}"
+    git co "{{stack}}"
     git rebase "$base"
     echo "stack rebased onto $base"
 
@@ -140,7 +140,7 @@ publish:
 
 # start a PR-sized branch off upstream with one commit cherry-picked from the stack
 pr-branch name commit: _clean
-    git switch -c {{name}} {{upstream}}/main
+    git co -b {{name}} {{upstream}}/main
     git cherry-pick {{commit}}
     @echo "review, then: just pr-push {{name}}"
 
