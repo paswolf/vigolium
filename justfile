@@ -10,10 +10,12 @@
 
 set shell := ["bash", "-uc"]
 
-stack    := "local/stable"
-patches  := `realpath -m ../vigolium-patches`
-upstream := "upstream"
-fork     := "origin"
+stack         := "local/stable"
+patches       := `realpath -m ../vigolium-patches`
+upstream      := "upstream"
+fork          := "origin"
+fork_repo     := "paswolf/vigolium"
+upstream_repo := "vigolium/vigolium"
 
 # abort with a clear message when the worktree is dirty
 _clean:
@@ -30,8 +32,13 @@ status:
     printf 'paswolf tags      %s\n' "$(git tag -l '*-paswolf.*' | tail -3 | tr '\n' ' ')"
     if git diff --quiet && git diff --cached --quiet; then printf 'worktree          clean\n'; else printf 'worktree          DIRTY\n'; fi
 
+# add the upstream remote on a fresh clone (a fork clone only has origin)
+bootstrap:
+    @git remote | grep -qx {{upstream}} || git remote add {{upstream}} git@github.com:{{upstream_repo}}.git
+    @echo "remotes: $(git remote | tr '\n' ' ')"
+
 # fetch upstream refs and tags
-sync:
+sync: bootstrap
     git fetch {{upstream}} --prune --tags
     @echo "upstream tip: $(git log --format='%h %s' -1 {{upstream}}/main)"
 
@@ -146,3 +153,5 @@ pr-branch name commit: _clean
 
 pr-push name:
     git push -u {{fork}} {{name}}
+    @echo "open the PR against upstream (not your fork's default branch):"
+    @echo "  https://github.com/{{upstream_repo}}/compare/main...{{fork_repo}}:{{name}}?expand=1"
