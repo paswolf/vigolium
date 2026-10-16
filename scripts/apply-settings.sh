@@ -29,6 +29,12 @@ usage() {
     echo "settings file: $file  ($(pairs 2>/dev/null | wc -l) keys)"
 }
 
+# vigolium's first-run update check stalls on a fresh HOME (no
+# ~/.vigolium/update-check.json yet), so bound every call.
+vg() {
+    if command -v timeout >/dev/null 2>&1; then timeout 60 vigolium "$@"; else vigolium "$@"; fi
+}
+
 # Settings file -> "key=value" lines: comments and blanks dropped, surrounding
 # whitespace trimmed, surrounding double quotes removed (the file quotes values
 # so that [lists] survive; `config set` must not receive the quotes).
@@ -44,7 +50,7 @@ pairs() {
 
 # Effective settings of the config in $HOME, as "key=value" lines.
 effective() {
-    vigolium config ls -j 2>/dev/null |
+    vg config ls -j 2>/dev/null |
         jq -r '.. | objects | select(has("key") and has("value")) | "\(.key)=\(.value)"' | sort
 }
 
@@ -52,7 +58,8 @@ effective() {
 vanilla() {
     local tmp; tmp=$(mktemp -d)
     mkdir -p "$tmp/.vigolium"
-    HOME="$tmp" vigolium config ls -j 2>/dev/null |
+    # subshell: the HOME override must not leak back into the caller
+    ( HOME="$tmp" vg config ls -j 2>/dev/null ) |
         jq -r '.. | objects | select(has("key") and has("value")) | "\(.key)=\(.value)"' | sort
     rm -rf "$tmp"
 }
@@ -141,7 +148,7 @@ apply)
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         key=${line%%=*}; val=${line#*=}
-        if out=$(vigolium config set "$key" "$val" 2>&1); then
+        if out=$(vg config set "$key" "$val" 2>&1); then
             ok=$((ok + 1)); printf '  ok   %-46s %s\n' "$key" "$val"
         else
             bad=$((bad + 1)); printf '  FAIL %-46s %s\n' "$key" "$val"
