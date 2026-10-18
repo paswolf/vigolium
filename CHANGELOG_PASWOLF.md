@@ -18,6 +18,7 @@ Add a section when a tag is cut; keep entries in upstream's style (Added / Fixed
 
 ### Fixed
 
+- The `--burp-bridge-url` project-resolution error is wrapped as a usage error, matching the `usage_error_lint_test.go` rule 0.5.4 added; without it `make test-unit` failed on the rebased stack.
 - `agent.olium.max_turns` now applies to non-autopilot engine runs too (agent query and triage), not only the autopilot loop.
 - Autopilot triage wrote its verdicts scoped to the run's own UUID, so findings imported by a child audit run stayed `draft` — unreachable by `vigolium finding --verdict confirmed,triaged` and absent from reports. The same scope also never matched rows stored without any run UUID (pre-scan and passive findings), so their verdicts were dropped silently while the rows kept the scanner's status. The write-back now spans the run, its child runs, and unattributed rows — rows owned by a *different* run are still left alone.
 - `findings.json` / `dismissed.json` were a model obligation: when the operator did not write them the run warned "artifact missing" even though the findings were in the database. They are now synthesized from the DB once verify-before-promote and triage have finished, so the artifact reflects the run's judged findings; operator-authored files still win.
