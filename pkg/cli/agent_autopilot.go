@@ -424,7 +424,7 @@ func runAgentAutopilot(cmd *cobra.Command, args []string) (err error) {
 		}
 		projectUUID, projectErr := resolveProjectUUID()
 		if projectErr != nil {
-			return fmt.Errorf("--burp-bridge-url: cannot resolve project: %w", projectErr)
+			return usageErrorf("--burp-bridge-url: cannot resolve project: %w", projectErr)
 		}
 		fmt.Fprintf(os.Stderr, "%s Importing live bridge traffic from %s ...\n",
 			terminal.InfoSymbol(), terminal.Cyan(validated))
