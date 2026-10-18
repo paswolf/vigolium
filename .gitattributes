@@ -50,3 +50,7 @@ test/**/*.html linguist-vendored
 public/**/*.js linguist-vendored
 public/**/*.ts linguist-vendored
 public/**/*.html linguist-vendored
+
+# Upstream's changelog is never edited here; a rebase must keep the new base's
+# copy instead of conflicting. Driver installed by `just bootstrap`.
+CHANGELOG.md merge=ours
