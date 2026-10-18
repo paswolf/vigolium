@@ -35,6 +35,7 @@ status:
 # add the upstream remote on a fresh clone (a fork clone only has origin)
 bootstrap:
     @git remote | grep -qx {{upstream}} || git remote add {{upstream}} git@github.com:{{upstream_repo}}.git
+    @git config merge.ours.driver true
     @echo "remotes: $(git remote | tr '\n' ' ')"
 
 # fetch upstream refs and tags
@@ -129,9 +130,9 @@ upgrade: sync _clean
     echo "  git push origin {{stack}} --tags"
     echo "  just publish"
 
-# push the stack and its tags to your fork
+# push the stack and its tags to your fork (a rebase rewrites history, so lease)
 push: _clean
-    git push {{fork}} {{stack}} --tags
+    git push --force-with-lease {{fork}} {{stack}} --tags
 
 # commit + push the regenerated series repo
 publish:

@@ -1,58 +1,34 @@
-# Local agent-pipeline patches (applied on top of v0.5.3)
+# Local patch rationale (`local/stable`)
 
-This file documents the local patch stack applied to this checkout for the
-autopilot/scan pipeline. It is **not** upstream work: it exists so the fixes
-survive a rebase onto a newer release, and so it is obvious when a release has
-made one redundant.
+Why each patch exists, and which invariants a rebase onto a newer release must
+preserve. The workflow itself — branch model, justfile recipes, the step-by-step
+upgrade procedure, the changelog policy — lives at the repo root in
+`UPGRADE_PASWOLF.md`. What the fork changes per release: `CHANGELOG_PASWOLF.md`.
 
-- Baseline: `82a92a92` (`v0.5.3` plus the earlier `agent.olium.max_turns` fix)
-- Patch commits: `ce8fcf20` — *"Fixed some weird behaviour causing the scan to degrade"*
-  (code fixes) → `77725f2a` — *"test(agent): lock the pipeline fixes and document
-  reapplying them"* (tests + this guide). Patch 8 below is queued on top of `77725f2a`.
-- Diff: `git show ce8fcf20` / `git diff 82a92a92..ce8fcf20 --stat`
-- Config side (separate, not in git): `vigolium-tuning.sh` in the scan working
-  directory applies `agent.olium.*` settings via `vigolium config set`. If a
-  release does not know a key, `config set` fails — that is the signal that the
-  matching code patch is missing too.
+Upstream's `CHANGELOG.md` is never edited here: `.gitattributes` marks it
+`merge=ours` (driver installed by `just bootstrap`), so a rebase keeps the new
+base's copy instead of producing a conflict. Local entries go to
+`CHANGELOG_PASWOLF.md`.
 
 Everything below is written in terms of **symbols and strings**, not line
 numbers, because line numbers do not survive a rebase.
 
-## Config side (not in git)
+## Config side
 
-The code patches change behaviour; these settings are what the runs actually need.
-On a fresh instance they are `vigolium config set <key> <value>` (the same values
-the `vigolium-tuning.sh` script in the scan working directory applies, plus the
-keys patch 6 added):
+Not in git, and no longer a `config set` list in this file: the settings these
+runs need live in `scripts/vigolium-settings.env`, applied by
+`scripts/apply-settings.sh` (`--check` diffs against a vanilla install,
+`--verify` checks the live config, `--dry-run` prints the commands).
+`scripts/README.md` documents both. The older `vigolium-tuning.sh` in the scan
+working directory is superseded by that file; delete it when convenient.
 
-```bash
-# engine budgets (the last three are only settable because of patch 6)
-vigolium config set agent.olium.max_turns 400
-vigolium config set agent.olium.call_timeout_sec 3600
-vigolium config set agent.olium.section_max_turns 40
-vigolium config set agent.olium.stall_turns 20
-vigolium config set agent.olium.stall_rotations 5
-# operator mode: shadow lands findings directly, so a stall-stop is not fatal
-vigolium config set agent.olium.autopilot_mode shadow
-# DB context injected into every prompt (defaults are 50/100/20/50)
-vigolium config set agent.context_limits.max_findings 200
-vigolium config set agent.context_limits.max_endpoints 400
-vigolium config set agent.context_limits.max_high_risk 60
-vigolium config set agent.context_limits.min_risk_score 30
-# keep 4xx bookkeeping records; keep the jstangle admission ceiling valid
-vigolium config set discovery.jstangle.persist_not_found_emit_statuses 400,405,415,422
-vigolium config set discovery.jstangle.hard_input_mb 16
-# template coverage in every profile (source-based runs skip the pre-scan, and the
-# agent only reaches the template phase if it asks for it)
-vigolium config set scanning_strategy.lite.known_issue_scan true
-vigolium config set scanning_strategy.balanced.known_issue_scan true
-vigolium config set scanning_strategy.deep.known_issue_scan true
-```
+Two properties worth knowing when a release moves:
 
-Two notes from this instance: `agent.olium.max_concurrent` is 4 here (the tuning
-script suggests 7 — raise it only if the endpoint tolerates the extra in-flight
-calls), and `scanning_pace.max_duration: 1h` bounds native phases, with the
-known-issue phase taking half of it (`duration_factor=0.5` → 30m).
+- Unknown keys fail loudly (`key "…" not found: unknown config key`), which is
+  the signal that a setting lost its code patch or was renamed upstream.
+- Value validation is inconsistent: `scope.cli_origin_mode` rejects values
+  outside `all|relaxed|balanced|strict`, but `agent.olium.autopilot_mode` and
+  `discovery.wordlists.tier` accept garbage and fall back silently.
 
 ## What the patches encode (preserve these invariants when rebasing)
 
@@ -332,37 +308,114 @@ cover knobs that did not exist before the patch.
   operator observed, or the record it replayed (see the operator brief's
   Deliverable section).
 
-## Reapplying on a new release
+## Applying a new upstream release
+
+All git and `make`; no model calls, no API cost. `<old>`/`<new>` below are
+release tags (`v0.5.3`, `v0.5.4`, …).
+
+### 0. Pre-flight
 
 ```bash
-cd ~/Projects/vigolium-vX.Y.Z
-git cherry-pick ce8fcf20 77725f2a   # plus any later patch commit; or:
-                                    # git rebase --onto vX.Y.Z 82a92a92 <branch>
+cd ~/Projects/vigolium
+git co local/stable
+git status -sb                 # clean tree — `just rebase` refuses otherwise
+git branch backup/pre-<new>    # free rollback ref
+just verify                    # the series currently matches the stack
+cp ~/.vigolium/database-vgnm.sqlite ~/.vigolium/database-vgnm.sqlite.bak
 ```
 
-Conflict hotspots (rebasing: expect these, they are the ones that touch hot code):
+The database copy is not paranoia: a new binary may migrate the SQLite schema on
+first run, and that is not reversible.
+
+### 1. Fetch and size up the change
+
+```bash
+just sync                      # bootstrap + fetch upstream --prune --tags
+just status                    # "upstream tip … (<new>)"
+git log --oneline <old>..<new>
+git diff --stat <old>..<new> -- pkg/agent pkg/olium internal/config pkg/cli CHANGELOG.md
+```
+
+The `--stat` is the important one: it shows the files the patches touch — where
+the rebase will fight — and whether upstream fixed something the stack carries.
+A patch that is now upstream disappears during the rebase (patch-id matching);
+that is the system working.
+
+### 2. Rebase
+
+```bash
+just rebase                    # onto `git describe --tags --abbrev=0 upstream/main`
+```
+
+The base is the **release tag**, not a moving `main`, so it is deterministic.
+Conflicts are the normal mechanism: resolve, `git add`, `git rebase --continue`;
+`git rebase --abort` returns to the pre-rebase state.
+
+Conflict hotspots (the per-patch sections below carry the invariants to preserve):
 
 | File | Why it conflicts |
 | --- | --- |
+| `CHANGELOG.md` | a local patch edits it; take upstream's side: `git co --ours CHANGELOG.md` |
 | `pkg/olium/autopilot/autopilot.go` | outer loop, `Options`, halt wiring |
 | `pkg/olium/autopilot/section.go` | controller knobs and rotation decision |
 | `pkg/agent/autopilot_pipeline.go` | pipeline tail ordering (artifacts after triage) |
 | `pkg/agent/triage.go`, `pkg/database/repository_findings.go` | write-back scope |
 | `internal/config/agent.go` | new `OliumConfig` fields and defaults |
 
-After the rebase:
+In a rebase, `--ours` is the new base (upstream) and `--theirs` is your commit.
+
+Then confirm nothing vanished by accident:
 
 ```bash
-make build                           # FIRST. Bootstraps the generated blobs:
-                                     #   internal/resources/deparos/jstangle/*.pin+.zst
-                                     #   are gitignored and produced by `make deps`,
-                                     #   so a bare `go build ./...` on a fresh clone
-                                     #   fails on the embed directive.
-make test-unit                       # repo suite
-go test ./pkg/olium/autopilot/ ./pkg/agent/ ./pkg/database/ ./internal/config/ ./pkg/cli/ -count=1
-./vigolium-tuning.sh                 # config-side settings (run from the scan dir)
-vigolium config ls olium | grep stall_turns   # patch 6 present?
+git log --oneline <new>..local/stable
+just status                    # "= N commit(s) on top of <new>"
 ```
 
-If a release fixes one item differently, delete that section here and its test
-rather than keeping a second implementation of the same behaviour.
+### 3. Test, tag, build
+
+```bash
+just test                      # make test-unit
+just test-full                 # once per base bump
+make lint
+just tag                       # v<new>-paswolf.1 — tag before building
+make build                     # never a bare `go build`: version injection
+```
+
+Smoke the binary, including the config surface:
+
+```bash
+vigolium version
+scripts/apply-settings.sh --verify
+```
+
+`--verify` is the cheap regression test for config-schema drift: a renamed or
+removed key fails loudly, and `config set` refuses unknown keys. Fix
+`scripts/vigolium-settings.env` then, while the release is fresh.
+
+### 4. Export, prove, publish
+
+```bash
+just export-series
+just verify                    # am clean AND tree == stack; do not publish otherwise
+just push
+just publish                   # series repo: ../vigolium-patches
+```
+
+`push` passes `--tags`; for precision use
+`git push origin local/stable <new>-paswolf.1`.
+
+### Shortcut
+
+```bash
+just upgrade
+```
+
+is `sync → rebase → test → tag → export-series → verify` with fail-fast
+semantics. Keep step 0 around it, and run `just push` / `just publish` after.
+
+## When a release absorbs a patch
+
+Delete that section here and its test rather than keeping a second
+implementation of the same behaviour. The stack shrinking is the goal: the
+rebase drops a commit that is already upstream, the series shrinks with it, and
+`just verify` still proves the remainder.
