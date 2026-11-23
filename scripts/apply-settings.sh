@@ -78,6 +78,21 @@ paired_diff() {
         }' "$1" "$2" | sort
 }
 
+# same_value <want> <have>: compare as values, not as text. A list in the
+# settings file is spelled readably ("[401, 403, 429]") while `config ls -j`
+# renders it compactly ("[401,403,429]"); both are the same stored array, so
+# normalize lists/objects through jq before comparing. Scalars stay textual:
+# normalizing those would turn "060" vs "60" into a false match.
+same_value() {
+    local a b
+    [ "$1" = "$2" ] && return 0
+    case $1 in \[*|{*) ;; *) return 1 ;; esac
+    case $2 in \[*|{*) ;; *) return 1 ;; esac
+    a=$(printf '%s' "$1" | jq -cS . 2>/dev/null) || return 1
+    b=$(printf '%s' "$2" | jq -cS . 2>/dev/null) || return 1
+    [ "$a" = "$b" ]
+}
+
 # verify: every key in the settings file must equal the effective value.
 verify() {
     command -v jq >/dev/null 2>&1 || { echo "verify needs jq" >&2; return 1; }
@@ -88,7 +103,7 @@ verify() {
         total=$((total + 1))
         key=${line%%=*}; val=${line#*=}
         got=$(printf '%s\n' "$have" | grep -F "$key=" | head -1 | cut -d= -f2-)
-        if [ "$got" != "$val" ]; then
+        if ! same_value "$val" "$got"; then
             printf '  drift %-46s wanted %-22s have %s\n' "$key" "$val" "${got:-(missing)}"
             drift=$((drift + 1))
         fi
