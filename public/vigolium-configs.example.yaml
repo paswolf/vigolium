@@ -1648,6 +1648,16 @@ agent:
     # Default: 0
     max_tokens: 0
 
+    # Conversation text bytes before older tool results are elided.
+    # 0 = engine default, 409600 bytes (400 KiB, roughly 100k tokens).
+    # Negative disables compaction. Recent six assistant turns are kept,
+    # so this is a best-effort threshold, not a strict context-window cap.
+    # Excludes system prompt, tool definitions and tool-call arguments;
+    # leave headroom for those and model output when raising it.
+    # Independent of max_tokens (the per-response output budget).
+    # Default: 0
+    max_history_bytes: 0
+
     # Sampling temperature. Accepted for backward compatibility and IGNORED:
     # current Claude models reject sampling parameters outright.
     # Default: 0.0

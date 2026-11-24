@@ -444,6 +444,7 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 		Model:                model,
 		ReasoningEffort:      oliumCfg.ReasoningEffort,
 		MaxTokens:            oliumCfg.MaxTokens,
+		MaxHistoryBytes:      oliumCfg.MaxHistoryBytes,
 		Target:               cfg.TargetURL,
 		SourcePath:           cfg.SourcePath,
 		Focus:                cfg.Focus,

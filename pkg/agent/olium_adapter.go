@@ -146,6 +146,7 @@ func buildOliumEngineWithSpec(cfg *config.OliumConfig, spec SessionSpec) (*oengi
 		Model:             model,
 		System:            system,
 		MaxTurns:          maxTurns,
+		MaxHistoryBytes:   cfg.MaxHistoryBytes,
 		EnablePromptCache: spec.EnablePromptCache,
 		// Skills, when set, are rendered into the system prompt as an
 		// <available_skills> block by engine.New. The load_skill tool that

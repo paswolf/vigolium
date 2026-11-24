@@ -130,6 +130,11 @@ type Options struct {
 	// Mirrors agent.olium.max_tokens.
 	MaxTokens int
 
+	// MaxHistoryBytes sets the conversation text compaction threshold.
+	// Mirrors agent.olium.max_history_bytes: 0 = engine default (400 KiB),
+	// negative disables compaction.
+	MaxHistoryBytes int
+
 	// ReasoningEffort is the thinking/effort level forwarded on every
 	// request (low|medium|high|xhigh|max; "" = provider default). Autopilot
 	// builds its own engine.Config, so without this the configured
@@ -803,6 +808,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		MaxToolCalls:    opts.MaxToolCalls,
 		ReasoningEffort: opts.ReasoningEffort,
 		MaxTokens:       opts.MaxTokens,
+		MaxHistoryBytes: opts.MaxHistoryBytes,
 		SessionID:       cacheKey(opts),
 		// Autopilot runs many turns against a stable system prompt and
 		// tool list; prompt caching cuts the repeated prefix tokens by

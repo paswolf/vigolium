@@ -13,6 +13,7 @@ Add a section when a tag is cut; keep entries in upstream's style (Added / Fixed
 
 ### Added
 
+- `agent.olium.max_history_bytes` configures the conversation-text compaction threshold across interactive/headless olium, query/triage/swarm sessions and CLI/server autopilot. Zero/unset preserves 400 KiB (roughly 100k tokens); positive values replace it and negative values disable compaction. Forked sessions inherit it; `max_tokens` remains a separate per-response output budget.
 - `agent.olium.section_max_turns` / `agent.olium.stall_turns` / `agent.olium.stall_rotations` tune the durable-autopilot section budgets (defaults 40 / 12 / 3) instead of pinning them to package constants.
 - Autopilot grants a *stopped* run one report-only turn. When the stall guard stops a run, or the engine gives up on its own, and nothing was reported, the loop re-enters once with a reset context, a mission that points at the run transcript and requires the finding tool for everything verified, plus the `findings.json` / `dismissed.json` artifacts. The turn is exempt from the stall guard (recovering evidence by reading looks unproductive to it) and ends the run when it reaches its section limit. Opt out with `Options.NoFinalReportTurn`.
 

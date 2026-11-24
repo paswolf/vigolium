@@ -69,6 +69,7 @@ type OliumConfig struct {
 	SystemPrompt        string               `yaml:"system_prompt"`         // empty = built-in olium prompt
 	CustomProvider      CustomProviderConfig `yaml:"custom_provider"`       // openai-compatible / anthropic-compatible knobs: base_url / model_id / api_key / extra_headers
 	MaxTokens           int                  `yaml:"max_tokens"`            // per-response output cap; 0 = provider default (64000 on Anthropic). Honored by the Anthropic transports only; a value above the model's cap is ignored rather than sent
+	MaxHistoryBytes     int                  `yaml:"max_history_bytes"`     // conversation text compaction threshold in bytes; 0 = engine default (400 KiB), negative disables compaction; not a model context-token limit
 	Temperature         float64              `yaml:"temperature"`           // accepted but ignored: current Claude models reject sampling params
 	MaxTurns            int                  `yaml:"max_turns"`             // default 32. Applies to short non-autopilot engine uses (swarm phases, source analysis, query). Autopilot ignores this and uses its own pkg/olium/autopilot.DefaultAutopilotMaxTurns (200); override autopilot via --max-commands or the API MaxCommands field.
 	CacheSize           int                  `yaml:"cache_size"`            // LRU entries; default 1024, 0 disables
