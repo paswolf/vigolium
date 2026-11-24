@@ -227,7 +227,8 @@ agent:
     llm_api_key: ""                # supports ${ENV_VAR}; falls back to $ANTHROPIC_API_KEY / $OPENAI_API_KEY
     reasoning_effort: medium       # minimal|low|medium|high|xhigh (codex)
     system_prompt: ""              # empty = built-in olium prompt
-    max_tokens: 1000000
+    max_tokens: 0                  # per-response output cap; 0 = provider default
+    max_history_bytes: 0           # 0 = 400 KiB compaction threshold; negative = disabled
     temperature: 0.0
     max_turns: 32
     cache_size: 1024               # LRU; 0 disables
@@ -238,7 +239,34 @@ agent:
       model_id: gemma4:latest
 ```
 
-`DefaultOliumConfig()` (agent.go:291) ships these exact defaults so `vigolium config ls olium` shows every knob without requiring user yaml.
+`DefaultOliumConfig()` ships these defaults so `vigolium config ls olium` shows every knob without requiring user yaml.
+
+### Conversation history budget
+
+`agent.olium.max_history_bytes` controls when the in-process engine elides older
+tool results. It applies to interactive/headless olium, query/triage/swarm sessions
+(including forks), and both CLI and server/pipeline autopilot runs. Zero or an
+omitted value keeps the existing 409600-byte (400 KiB, roughly 100k-token)
+threshold; a positive value replaces it; a negative value disables compaction.
+The individual tool-result truncation/spill limits remain unchanged.
+
+For example, retain up to roughly 1 MiB of conversation text before compaction:
+
+```bash
+vigolium config set agent.olium.max_history_bytes 1048576
+```
+
+This is a **best-effort byte threshold**, not the model's context-token limit.
+Only message text and tool-result content are counted, not the system prompt,
+tool definitions, tool-call arguments or serialization overhead. The latest six
+assistant turns and their tool results are preserved even above the threshold.
+Leave room for these uncounted inputs and model reasoning/output; higher values
+retain more evidence but increase request cost and latency. Disabling compaction
+can let long runs exceed the provider's context window.
+
+`agent.olium.max_tokens` is independent: it limits per-response output on the
+Anthropic transports, and OpenAI-compatible providers ignore it. Raising it does
+not retain more conversation history.
 
 Adjacent config blocks worth knowing:
 

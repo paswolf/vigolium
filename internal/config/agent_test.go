@@ -75,7 +75,7 @@ func TestDefaultAgentConfig_Olium(t *testing.T) {
 		"provider", "model", "oauth_cred_path", "oauth_token", "llm_api_key",
 		"google_cloud_project", "google_cloud_location",
 		"reasoning_effort", "system_prompt", "max_tokens", "temperature",
-		"max_turns", "cache_size",
+		"max_history_bytes", "max_turns", "cache_size",
 		"section_max_turns", "stall_turns", "stall_rotations",
 	} {
 		if !oliumKeys[want] {

@@ -328,6 +328,7 @@ func runAutopilotOlium(parentCtx context.Context, settings *config.Settings, rep
 		Model:           model,
 		ReasoningEffort: settings.Agent.Olium.ReasoningEffort,
 		MaxTokens:       settings.Agent.Olium.MaxTokens,
+		MaxHistoryBytes: settings.Agent.Olium.MaxHistoryBytes,
 		Target:          autopilotTarget,
 		SourcePath:      autopilotSource,
 		Focus:           autopilotFocus,

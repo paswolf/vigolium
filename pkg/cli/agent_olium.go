@@ -99,6 +99,7 @@ func runAgentOlium(cmd *cobra.Command, args []string) error {
 		SystemPrompt:        firstNonEmptyString(oliumSystem, oliumCfg.SystemPrompt),
 		ReasoningEffort:     oliumCfg.ReasoningEffort,
 		MaxTokens:           oliumCfg.MaxTokens,
+		MaxHistoryBytes:     oliumCfg.MaxHistoryBytes,
 		Version:             getVersion(),
 		// openai-compatible — --base-url / --llm-api-key / --model fall back
 		// to custom_provider.* in YAML. ExtraHeaders has no CLI flag; set

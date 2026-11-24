@@ -133,6 +133,11 @@ type Options struct {
 	// Mirrors agent.olium.max_tokens.
 	MaxTokens int
 
+	// MaxHistoryBytes sets the conversation text compaction threshold.
+	// Mirrors agent.olium.max_history_bytes: 0 = engine default (400 KiB),
+	// negative disables compaction.
+	MaxHistoryBytes int
+
 	// ReasoningEffort is forwarded on every provider request and shown in
 	// the TUI banner alongside the model id.
 	// Plumbed from agent.olium.reasoning_effort. Display-only today; the
@@ -214,6 +219,7 @@ func RunTUI(opts Options) error {
 		System:          opts.SystemPrompt,
 		ReasoningEffort: opts.ReasoningEffort,
 		MaxTokens:       opts.MaxTokens,
+		MaxHistoryBytes: opts.MaxHistoryBytes,
 		SessionID:       engine.SessionCacheKey(opts.SessionDir),
 		Recorder:        newSessionRecorder(opts, providerName, resolvedModel),
 	})
@@ -262,6 +268,7 @@ func buildHeadlessEngine(opts Options) (*engine.Engine, string, string, error) {
 		System:          opts.SystemPrompt,
 		ReasoningEffort: opts.ReasoningEffort,
 		MaxTokens:       opts.MaxTokens,
+		MaxHistoryBytes: opts.MaxHistoryBytes,
 		SessionID:       engine.SessionCacheKey(opts.SessionDir),
 		Recorder:        newSessionRecorder(opts, name, model),
 	}), name, model, nil
