@@ -539,9 +539,6 @@ func (r *AutopilotPipelineRunner) RunAutonomous(ctx context.Context, cfg Autopil
 	if cfg.Triage {
 		emitProgress(&cfg, "triage", "triaging findings")
 		if _, terr := RunAutopilotTriage(ctx, r.engine, r.repo, AutopilotTriageParams{
-			TargetURL:       cfg.TargetURL,
-			SourcePath:      cfg.SourcePath,
-			ScanUUID:        cfg.ScanUUID,
 			ProjectUUID:     cfg.ProjectUUID,
 			AgenticScanUUID: cfg.ParentAgenticScanUUID,
 			SessionDir:      cfg.SessionDir,

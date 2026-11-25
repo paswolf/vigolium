@@ -462,9 +462,12 @@ func aggregateFollowUps(followUps []FollowUpScan) ScanRequest {
 // the findings it imports, so writing only the parent's uuid would leave every
 // audit finding stuck at draft.
 func writeBackTriageVerdicts(ctx context.Context, repo *database.Repository, projectUUID, agenticScanUUID string, merged *TriageResult) {
-	if merged == nil {
-		return
+	if merged != nil {
+		writeScopedTriageVerdicts(ctx, repo, projectUUID, triageRunUUIDs(ctx, repo, agenticScanUUID), merged)
 	}
+}
+
+func triageRunUUIDs(ctx context.Context, repo *database.Repository, agenticScanUUID string) []string {
 	// Resolve the child runs once per call. An empty agenticScanUUID (the
 	// pipeline path) leaves runUUIDs empty, which scopes the write by project
 	// alone — the pre-existing behaviour.
@@ -485,14 +488,16 @@ func writeBackTriageVerdicts(ctx context.Context, repo *database.Repository, pro
 			}
 		}
 	}
+	return runUUIDs
+}
+
+func writeScopedTriageVerdicts(ctx context.Context, repo *database.Repository, projectUUID string, runUUIDs []string, merged *TriageResult) {
 	apply := func(items []TriagedFinding, status string) {
 		for _, t := range items {
 			if t.FindingHash == "" {
 				continue
 			}
-			// includeUnattributed: the triage reads findings project-wide, and
-			// pre-scan/passive findings carry no run uuid — without it their
-			// verdicts matched nothing and the rows kept the scanner's status.
+			// Pre-scan/passive findings can carry no run uuid.
 			rows, err := repo.UpdateFindingStatusByHashForRuns(ctx, projectUUID, runUUIDs, true, t.FindingHash, status)
 			if err != nil {
 				zap.L().Warn("triage writeback failed",
@@ -508,7 +513,6 @@ func writeBackTriageVerdicts(ctx context.Context, repo *database.Repository, pro
 				zap.L().Warn("triage writeback failed",
 					zap.String("finding_hash", t.FindingHash),
 					zap.String("status", status),
-					zap.String("agentic_scan_uuid", agenticScanUUID),
 					zap.Int("run_uuids_tried", len(runUUIDs)),
 					zap.String("reason", "no matching finding across run scopes"))
 			}
