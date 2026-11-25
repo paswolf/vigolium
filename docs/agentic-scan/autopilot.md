@@ -271,6 +271,14 @@ The `findings.json` / `dismissed.json` artifacts are synthesized **after**
 verify-before-promote and triage, so the file reflects the run's judged
 findings rather than the state before those stages ran.
 
+`agent autopilot --triage` reviews stored finding evidence in fresh, tool-free
+requests. Each batch holds at most 25 findings and 48 KiB of encoded finding
+summaries. Long fields are excerpted; the database retains the original
+evidence. The pass does not embed the source tree or endpoint inventory, and
+leaves a finding's status unchanged when the supplied evidence is inconclusive.
+`agent.olium.max_history_bytes` controls multi-turn history compaction, not
+this per-request limit.
+
 A separate **finding rate-limit** lives inside `report_finding`:
 - soft warning at 50 findings (still saved)
 - hard cap at 200 (rejected with an `IsError` result that nudges the model

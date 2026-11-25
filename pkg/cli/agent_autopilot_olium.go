@@ -394,9 +394,6 @@ func runAutopilotOlium(parentCtx context.Context, settings *config.Settings, rep
 	if autopilotTriage && end.Err == nil && !walledOut && !end.BudgetExhausted && !end.Cancelled {
 		triageEngine := agent.NewEngine(settings, repo)
 		if _, terr := agent.RunAutopilotTriage(ctx, triageEngine, repo, agent.AutopilotTriageParams{
-			TargetURL:       autopilotTarget,
-			SourcePath:      autopilotSource,
-			ScanUUID:        globalScanUUID,
 			ProjectUUID:     projectUUID,
 			AgenticScanUUID: parentAgenticScanUUID,
 			SessionDir:      sessionDir,
